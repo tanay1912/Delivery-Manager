@@ -1,0 +1,107 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-surface-subtle text-slate-900 antialiased;
+    background-image:
+      radial-gradient(ellipse 80% 50% at 50% -20%, rgb(99 102 241 / 0.08), transparent),
+      radial-gradient(ellipse 60% 40% at 100% 0%, rgb(148 163 184 / 0.06), transparent);
+    background-attachment: fixed;
+  }
+
+  ::selection {
+    @apply bg-brand-200 text-brand-900;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-white rounded-2xl border border-slate-200/80 shadow-card;
+  }
+
+  .card-header {
+    @apply px-5 py-4 border-b border-slate-100 bg-gradient-to-b from-slate-50/80 to-white;
+  }
+
+  .card-title {
+    @apply font-semibold text-slate-900 tracking-tight;
+  }
+
+  .card-subtitle {
+    @apply text-xs text-slate-500 mt-0.5;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl text-sm font-semibold transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none;
+  }
+
+  .btn-primary {
+    @apply btn px-4 py-2.5 bg-brand-600 text-white shadow-sm hover:bg-brand-700 hover:shadow focus-visible:ring-brand-500 active:scale-[0.98];
+  }
+
+  .btn-secondary {
+    @apply btn px-4 py-2.5 border border-slate-200 bg-white text-slate-700 shadow-sm hover:bg-slate-50 hover:border-slate-300 focus-visible:ring-slate-400 active:scale-[0.98];
+  }
+
+  .btn-ghost {
+    @apply btn px-3 py-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 focus-visible:ring-slate-400;
+  }
+
+  .btn-danger {
+    @apply btn px-4 py-2.5 bg-red-600 text-white shadow-sm hover:bg-red-700 focus-visible:ring-red-500 active:scale-[0.98];
+  }
+
+  .btn-success {
+    @apply btn px-4 py-2.5 bg-emerald-600 text-white shadow-sm hover:bg-emerald-700 focus-visible:ring-emerald-500 active:scale-[0.98];
+  }
+
+  .btn-sm {
+    @apply px-3 py-1.5 text-xs rounded-lg;
+  }
+
+  .input {
+    @apply block w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 shadow-sm transition-colors focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20;
+  }
+
+  .label {
+    @apply block text-sm font-medium text-slate-700;
+  }
+
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset;
+  }
+
+  .badge-success {
+    @apply badge bg-emerald-50 text-emerald-700 ring-emerald-600/20;
+  }
+
+  .badge-info {
+    @apply badge bg-sky-50 text-sky-700 ring-sky-600/20;
+  }
+
+  .badge-warning {
+    @apply badge bg-amber-50 text-amber-700 ring-amber-600/20;
+  }
+
+  .badge-neutral {
+    @apply badge bg-slate-100 text-slate-600 ring-slate-500/10;
+  }
+
+  .alert-error {
+    @apply p-4 rounded-xl bg-red-50 border border-red-200/80 text-red-700 text-sm;
+  }
+
+  .skeleton {
+    @apply bg-gradient-to-r from-slate-200 via-slate-100 to-slate-200 bg-[length:200%_100%] animate-shimmer rounded-lg;
+  }
+
+  .nav-link {
+    @apply text-sm font-medium text-slate-600 px-3 py-2 rounded-lg transition-colors hover:text-slate-900 hover:bg-slate-100/80;
+  }
+
+  .nav-link-active {
+    @apply nav-link text-brand-700 bg-brand-50 hover:bg-brand-50 hover:text-brand-800;
+  }
+}
