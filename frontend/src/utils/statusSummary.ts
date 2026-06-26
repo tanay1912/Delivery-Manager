@@ -100,10 +100,6 @@ export interface StatusSummaryItem {
 export function statusSummaryItems(summary?: IssueSummary | null): StatusSummaryItem[] {
   const items: StatusSummaryItem[] = [];
 
-  if ((summary?.total ?? 0) > 0) {
-    items.push({ label: "Total", value: summary?.total ?? 0 });
-  }
-
   const byStatus = summary?.by_status ?? {};
   for (const [status, breakdown] of sortStatusEntries(Object.entries(byStatus))) {
     if (breakdown.total > 0) {

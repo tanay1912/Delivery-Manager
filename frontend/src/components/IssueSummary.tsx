@@ -7,10 +7,6 @@ interface IssueSummaryProps {
   projectLabel: string;
 }
 
-const STAT_ACCENT: Record<string, string> = {
-  Total: "border-blue-500",
-};
-
 function IssueTypeBadges({ breakdown }: { breakdown?: StatusBreakdown }) {
   const types = issueTypeItems(breakdown);
 
@@ -46,34 +42,25 @@ function StatItem({
   loading: boolean;
   showDivider: boolean;
 }) {
-  const accent = STAT_ACCENT[label] ?? statusSummaryAccent(label);
-  const showIssueTypes = label !== "Total";
-
-  const isTotal = label === "Total";
+  const accent = statusSummaryAccent(label);
 
   return (
     <div
-      className={`flex items-center py-3 ${
-        isTotal
-          ? "flex-none shrink-0 w-max px-3"
-          : "flex-1 basis-0 min-w-[9.5rem] px-4 sm:px-5"
-      } ${showDivider ? "border-l border-slate-200" : ""}`}
+      className={`flex flex-1 basis-0 min-w-[9.5rem] items-center px-4 py-3 sm:px-5 ${
+        showDivider ? "border-l border-slate-200" : ""
+      }`}
     >
-      <div className={`border-l-[3px] min-w-0 ${isTotal ? "pl-2 w-max" : "pl-3"} ${accent}`}>
+      <div className={`min-w-0 border-l-[3px] pl-3 ${accent}`}>
         {loading ? (
-          <div className={`skeleton ${isTotal ? "h-8 w-8" : "h-8 w-12"}`} />
+          <div className="skeleton h-8 w-12" />
         ) : (
-          <p
-            className={`font-bold text-slate-900 tabular-nums tracking-tight leading-none ${
-              isTotal ? "text-2xl" : "text-2xl sm:text-3xl"
-            }`}
-          >
+          <p className="text-2xl font-bold tabular-nums leading-none tracking-tight text-slate-900 sm:text-3xl">
             {value}
           </p>
         )}
-        <div className={`mt-1 flex flex-wrap items-center gap-1.5 ${isTotal ? "whitespace-nowrap" : ""}`}>
+        <div className="mt-1 flex flex-wrap items-center gap-1.5">
           <p className="text-[11px] font-medium uppercase tracking-wider text-slate-500">{label}</p>
-          {showIssueTypes && <IssueTypeBadges breakdown={breakdown} />}
+          <IssueTypeBadges breakdown={breakdown} />
         </div>
       </div>
     </div>
