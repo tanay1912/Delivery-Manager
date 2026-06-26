@@ -34,6 +34,47 @@ def _format_issue(issue: dict) -> dict:
     }
 
 
+def _jira_error_detail(exc: httpx.HTTPStatusError, fallback: str) -> str:
+    detail = fallback
+    try:
+        body = exc.response.json()
+        if isinstance(body, dict):
+            messages = body.get("errorMessages") or []
+            errors = body.get("errors") or {}
+            if messages:
+                detail = "; ".join(messages)
+            elif errors:
+                detail = "; ".join(f"{k}: {v}" for k, v in errors.items())
+    except Exception:
+        pass
+    return detail
+
+
+async def _fetch_issue_summary(
+    client: JiraClient,
+    project: str | None = None,
+    *,
+    assigned_to_me: bool = True,
+) -> dict:
+    base_jql = JiraClient.build_jql(
+        project,
+        assigned_to_me=assigned_to_me,
+        order_by_updated=False,
+    )
+
+    by_status = await client.summarize_by_status(base_jql)
+
+    total = sum(bucket["total"] for bucket in by_status.values())
+    summary = {
+        "total": total,
+        "by_status": by_status,
+        "qis": sum(bucket["qis"] for bucket in by_status.values()),
+        "bug": sum(bucket["bug"] for bucket in by_status.values()),
+        "task": sum(bucket["task"] for bucket in by_status.values()),
+    }
+    return summary
+
+
 @router.get("/summary")
 async def issue_summary(
     project: str | None = Query(None, description="Filter by project key"),
@@ -42,39 +83,49 @@ async def issue_summary(
 ):
     client = jira_client_from_session(session)
 
-    async def count_for_category(status_category: str | None) -> int:
-        jql = JiraClient.build_jql(project, assigned_to_me=assigned_to_me, status_category=status_category)
-        return await client.count_issues(jql)
+    try:
+        return await _fetch_issue_summary(client, project, assigned_to_me=assigned_to_me)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=_jira_error_detail(exc, "Could not fetch issue summary from Jira"),
+        ) from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail="Could not reach Jira") from exc
+
+
+@router.get("/project-summaries")
+async def project_summaries(
+    projects: str = Query(..., description="Comma-separated Jira project keys"),
+    assigned_to_me: bool = Query(True, description="Only issues assigned to the connected user"),
+    session: dict = Depends(require_auth),
+):
+    project_keys = [key.strip() for key in projects.split(",") if key.strip()]
+    if not project_keys:
+        return {"summaries": {}}
+
+    client = jira_client_from_session(session)
 
     try:
-        total, todo, in_progress, done = await asyncio.gather(
-            count_for_category(None),
-            count_for_category("To Do"),
-            count_for_category("In Progress"),
-            count_for_category("Done"),
+        results = await asyncio.gather(
+            *[
+                _fetch_issue_summary(client, project_key, assigned_to_me=assigned_to_me)
+                for project_key in project_keys
+            ]
         )
     except httpx.HTTPStatusError as exc:
-        detail = "Could not fetch issue summary from Jira"
-        try:
-            body = exc.response.json()
-            if isinstance(body, dict):
-                messages = body.get("errorMessages") or []
-                errors = body.get("errors") or {}
-                if messages:
-                    detail = "; ".join(messages)
-                elif errors:
-                    detail = "; ".join(f"{k}: {v}" for k, v in errors.items())
-        except Exception:
-            pass
-        raise HTTPException(status_code=502, detail=detail) from exc
+        raise HTTPException(
+            status_code=502,
+            detail=_jira_error_detail(exc, "Could not fetch project summaries from Jira"),
+        ) from exc
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail="Could not reach Jira") from exc
 
     return {
-        "total": total,
-        "todo": todo,
-        "in_progress": in_progress,
-        "done": done,
+        "summaries": {
+            project_key: summary
+            for project_key, summary in zip(project_keys, results, strict=True)
+        }
     }
 
 

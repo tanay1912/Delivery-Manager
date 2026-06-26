@@ -9,8 +9,8 @@ import {
 } from "../api/client";
 import IssueSummary from "../components/IssueSummary";
 import IssueTable from "../components/IssueTable";
+import ConfiguredProjectsPanel from "../components/ConfiguredProjectsPanel";
 import Layout from "../components/Layout";
-import ProjectList from "../components/ProjectList";
 import {
   DashboardProjectProvider,
   useDashboardProjects,
@@ -55,6 +55,8 @@ function DashboardContent() {
   const [pageIndex, setPageIndex] = useState(0);
   const [hasNext, setHasNext] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [projectSummaries, setProjectSummaries] = useState<Record<string, IssueSummaryData>>({});
+  const [projectSummariesLoading, setProjectSummariesLoading] = useState(true);
   const [reloadingTickets, setReloadingTickets] = useState(false);
 
   const handleAuthError = useCallback(
@@ -96,7 +98,7 @@ function DashboardContent() {
             handleAuthError(err);
             return;
           }
-          setSummary({ total: 0, todo: 0, in_progress: 0, done: 0 });
+          setSummary({ total: 0, by_status: {}, qis: 0, bug: 0, task: 0 });
         })
         .finally(() => setSummaryLoading(false));
     },
@@ -128,6 +130,27 @@ function DashboardContent() {
   );
 
   useEffect(() => {
+    if (projects.length === 0) {
+      setProjectSummaries({});
+      setProjectSummariesLoading(false);
+      return;
+    }
+
+    setProjectSummariesLoading(true);
+    api
+      .getProjectSummaries(projects.map((p) => p.key))
+      .then((data) => setProjectSummaries(data.summaries))
+      .catch((err) => {
+        if (err instanceof ApiError && err.status === 401) {
+          handleAuthError(err);
+          return;
+        }
+        setProjectSummaries({});
+      })
+      .finally(() => setProjectSummariesLoading(false));
+  }, [projects, handleAuthError]);
+
+  useEffect(() => {
     loadSummary(selectedProject);
   }, [selectedProject, loadSummary]);
 
@@ -156,11 +179,15 @@ function DashboardContent() {
     setError(null);
     const token = pageTokens[pageIndex] ?? null;
     try {
-      const [summaryData, issuesData] = await Promise.all([
+      const [summaryData, issuesData, projectSummaryData] = await Promise.all([
         api.getIssueSummary(selectedProject ?? undefined),
         api.getIssues(selectedProject ?? undefined, token ?? undefined),
+        projects.length > 0
+          ? api.getProjectSummaries(projects.map((p) => p.key))
+          : Promise.resolve({ summaries: {} }),
       ]);
       setSummary(summaryData);
+      setProjectSummaries(projectSummaryData.summaries);
       setIssues(issuesData.issues);
       setIssuesTotal(issuesData.total);
       setHasNext(!issuesData.is_last && Boolean(issuesData.next_page_token));
@@ -176,7 +203,7 @@ function DashboardContent() {
     } finally {
       setReloadingTickets(false);
     }
-  }, [selectedProject, pageIndex, pageTokens, handleAuthError]);
+  }, [selectedProject, pageIndex, pageTokens, handleAuthError, projects]);
 
   const handleDeliver = (issue: Issue) => {
     setError(null);
@@ -185,10 +212,13 @@ function DashboardContent() {
     });
   };
 
+  const selectedProjectRecord = projects.find((p) => p.key === selectedProject);
   const selectedProjectName =
     selectedProject === null
       ? "All projects · assigned to me"
-      : `${projects.find((p) => p.key === selectedProject)?.name || selectedProject} · assigned to me`;
+      : selectedProjectRecord
+        ? `${selectedProjectRecord.key} · ${selectedProjectRecord.name} · assigned to me`
+        : `${selectedProject} · assigned to me`;
 
   return (
     <Layout user={user} siteName={siteName} onLogout={handleLogout}>
@@ -206,20 +236,23 @@ function DashboardContent() {
           </div>
         )}
 
-        {/* Mobile project filter — sidebar list is hidden below lg */}
-        <div className="lg:hidden mb-4 flex-shrink-0">
-          <div className="card overflow-hidden max-h-64 flex flex-col">
-            <div className="px-4 py-3 border-b border-slate-100 bg-slate-50/80 flex-shrink-0">
-              <h2 className="text-sm font-semibold text-slate-900">Configured projects</h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                {projectsLoading ? "Loading..." : `${projectsTotal} linked to Bitbucket`}
-              </p>
-            </div>
-            <ProjectList
+        <div className="flex flex-col lg:flex-1 lg:min-h-0 lg:overflow-y-auto">
+          <div className="rounded-xl border border-slate-200/80 shadow-card bg-white flex-shrink-0 overflow-hidden">
+            <IssueSummary
+              summary={summary}
+              loading={summaryLoading}
+              projectLabel={selectedProjectName}
+            />
+          </div>
+
+          <div className="mt-6 flex-shrink-0">
+            <ConfiguredProjectsPanel
               projects={projects}
               selectedKey={selectedProject}
               loading={projectsLoading}
               total={projectsTotal}
+              summaries={projectSummaries}
+              summariesLoading={projectSummariesLoading}
               onSelect={onSelect}
               onSearch={onSearch}
               emptyMessage={
@@ -227,21 +260,12 @@ function DashboardContent() {
                   ? "No projects are linked to Bitbucket yet."
                   : "No configured projects match your search."
               }
-              configureHref="/settings"
-              showMappingSettings
             />
           </div>
-        </div>
 
-        <div className="flex flex-col lg:flex-1 lg:min-h-0">
-          <IssueSummary
-            summary={summary}
-            loading={summaryLoading}
-            projectLabel={selectedProjectName}
-          />
-
-          <div className="card overflow-hidden flex flex-col mt-5 lg:flex-1 lg:min-h-0">
-            <div className="card-header flex items-center justify-between flex-shrink-0">
+          <div className="mt-6 pt-6 border-t border-slate-200/80 flex flex-col lg:flex-1 lg:min-h-0">
+            <div className="rounded-xl border border-slate-200/80 shadow-card bg-white overflow-hidden flex flex-col lg:flex-1 lg:min-h-0">
+              <div className="px-5 py-3.5 border-b border-slate-100 bg-white flex items-center justify-between flex-shrink-0">
               <div>
                 <h2 className="card-title">My tickets</h2>
                 <p className="card-subtitle">Assigned to you · sorted by last updated</p>
@@ -275,6 +299,7 @@ function DashboardContent() {
                 onNextPage={handleNextPage}
                 onPreviousPage={handlePreviousPage}
               />
+            </div>
             </div>
           </div>
         </div>

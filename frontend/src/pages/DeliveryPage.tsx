@@ -399,7 +399,7 @@ function RevisionStepsList({
               status === "active"
                 ? "bg-white border border-brand-200"
                 : status === "done"
-                  ? "bg-emerald-50/50 border border-emerald-100"
+                  ? "bg-brand-50/50 border border-brand-100"
                   : status === "failed"
                     ? "bg-red-50/50 border border-red-100"
                     : "bg-slate-50/50 border border-transparent"
@@ -413,7 +413,7 @@ function RevisionStepsList({
                 status === "active"
                   ? "font-medium text-brand-800"
                   : status === "done"
-                    ? "text-emerald-800"
+                    ? "text-brand-800"
                     : status === "failed"
                       ? "text-red-700"
                       : "text-slate-400"
@@ -522,7 +522,7 @@ function resolveDraftComment(run: DeliveryRun): string {
 function PrepareStepIcon({ status }: { status: "done" | "active" | "pending" }) {
   if (status === "done") {
     return (
-      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-100 text-emerald-600 ring-1 ring-emerald-200">
+      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-brand-100 text-brand-600 ring-1 ring-brand-200">
         <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
           <path
             fillRule="evenodd"
@@ -561,7 +561,11 @@ function implementationStepStatus(
   stepsLog: DeliveryRun["steps_log"],
 ): "done" | "active" | "pending" | "failed" {
   const entry = [...stepsLog].reverse().find((s) => s.step === stepId);
-  if (entry?.status === "failed") return "failed";
+  if (entry?.status === "skipped") return "done";
+  if (entry?.status === "failed") {
+    if (stepId === "transition_in_progress") return "done";
+    return "failed";
+  }
   if (entry?.status === "completed") return "done";
   if (entry?.status === "running") return "active";
   const order = IMPLEMENTATION_SUBSTEPS.map((s) => s.id);
@@ -569,7 +573,8 @@ function implementationStepStatus(
   if (idx <= 0) return "pending";
   const prev = order[idx - 1];
   const prevEntry = stepsLog.find((s) => s.step === prev);
-  if (prevEntry?.status === "completed") return "active";
+  if (prevEntry?.status === "completed" || prevEntry?.status === "skipped") return "active";
+  if (prevEntry?.status === "failed" && prev === "transition_in_progress") return "active";
   return "pending";
 }
 
@@ -590,7 +595,7 @@ function ImplementationStepsList({ run }: { run: DeliveryRun }) {
               status === "active"
                 ? "bg-white border border-brand-200"
                 : status === "done"
-                  ? "bg-emerald-50/50 border border-emerald-100"
+                  ? "bg-brand-50/50 border border-brand-100"
                   : status === "failed"
                     ? "bg-red-50/50 border border-red-100"
                     : "bg-slate-50/50 border border-transparent"
@@ -605,7 +610,7 @@ function ImplementationStepsList({ run }: { run: DeliveryRun }) {
                   status === "active"
                     ? "font-medium text-brand-800"
                     : status === "done"
-                      ? "text-emerald-800"
+                      ? "text-brand-800"
                       : status === "failed"
                         ? "text-red-700 font-medium"
                         : "text-slate-400"
@@ -649,6 +654,17 @@ function stepLogStatus(stepsLog: DeliveryRun["steps_log"], stepId: string): Merg
   if (entry.status === "skipped") return "skipped";
   if (entry.status === "running") return "active";
   return "pending";
+}
+
+function effectiveMergeStepStatus(
+  stepsLog: DeliveryRun["steps_log"],
+  stepId: string,
+): MergeProgressStatus {
+  const status = stepLogStatus(stepsLog, stepId);
+  if (stepId === "transition_in_testing" && status === "failed") {
+    return "skipped";
+  }
+  return status;
 }
 
 function historyCommandStatus(status: string): MergeProgressStatus {
@@ -783,7 +799,7 @@ function buildMergeProgressItems(
 
   const addStep = (id: string, label: string) => {
     const entry = latestStepEntry(stepsLog, id);
-    const status = stepLogStatus(stepsLog, id);
+    const status = effectiveMergeStepStatus(stepsLog, id);
     items.push({
       id,
       label,
@@ -829,7 +845,7 @@ function buildMergeProgressItems(
     const retryTarget = (run.pending_deploy_retry as "beta" | "master" | null) ?? mergingTarget;
     if (retryTarget === "beta" || (!retryTarget && (run.beta_merged || run.beta_pr_id || run.pr_id))) {
       addDeployGroup("deploy_beta", "Run Staging deployment commands");
-      const transitionStatus = stepLogStatus(stepsLog, "transition_in_testing");
+      const transitionStatus = effectiveMergeStepStatus(stepsLog, "transition_in_testing");
       if (transitionStatus !== "pending") {
         addStep("transition_in_testing", "Move ticket to Unit Testing");
       }
@@ -848,7 +864,7 @@ function buildMergeProgressItems(
   if (mergingTarget === "beta" || stepsLog.some((s) => s.step === "merge_beta_pr")) {
     addStep("merge_beta_pr", "Merge Staging pull request");
     addDeployGroup("deploy_beta", "Run Staging deployment commands");
-    const transitionStatus = stepLogStatus(stepsLog, "transition_in_testing");
+    const transitionStatus = effectiveMergeStepStatus(stepsLog, "transition_in_testing");
     if (transitionStatus !== "pending") {
       addStep("transition_in_testing", "Move ticket to Unit Testing");
     }
@@ -2436,7 +2452,7 @@ export default function DeliveryPage() {
                         type="button"
                         onClick={() => setMergeConfirmTarget("master")}
                         disabled={actionDisabled}
-                        className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-lg bg-green-600 px-8 py-3 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-50 transition-colors"
+                        className="btn-primary w-full sm:w-auto px-8 py-3"
                       >
                         <LockIcon />
                         {mergingMaster ? "Merging Live…" : "Approve & Merge Live PR"}
@@ -2446,7 +2462,7 @@ export default function DeliveryPage() {
                         type="button"
                         onClick={() => setMergeConfirmTarget("beta")}
                         disabled={actionDisabled}
-                        className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-lg bg-green-600 px-8 py-3 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-50 transition-colors"
+                        className="btn-primary w-full sm:w-auto px-8 py-3"
                       >
                         <LockIcon />
                         {mergingBeta
@@ -2466,7 +2482,7 @@ export default function DeliveryPage() {
                 {verificationDone ? (
                   <section className="bg-white border-2 border-brand-400 rounded-xl shadow-brand-md p-6">
                     <div className="flex items-center gap-2 mb-4">
-                      <span className="rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide text-green-700">
+                      <span className="rounded-full bg-brand-100 px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide text-brand-700">
                         Complete
                       </span>
                       <h2 className="text-lg font-bold text-slate-900">Step 4 — Verification</h2>
@@ -2495,7 +2511,7 @@ export default function DeliveryPage() {
                       <p className="text-sm text-slate-500">No verification results recorded.</p>
                     )}
 
-                    <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900 mt-4">
+                    <div className="rounded-xl border border-brand-200 bg-brand-50 p-4 text-sm text-brand-900 mt-4">
                       <p className="font-medium">Delivery complete — In Testing</p>
                       <p className="mt-1">
                         Pull request merged, websites verified, and Jira updated with testing screenshots.

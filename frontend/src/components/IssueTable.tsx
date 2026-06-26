@@ -15,11 +15,22 @@ interface IssueTableProps {
   onDeliver?: (issue: Issue) => void;
 }
 
+function displayIssueType(name?: string): string | undefined {
+  if (!name) return undefined;
+  const normalized = name.toLowerCase().replace(/[\s-]/g, "");
+  if (normalized === "subtask") return "Task";
+  return name;
+}
+
 function statusBadge(category?: string, status?: string): string {
   const s = (status || "").toLowerCase();
   const cat = (category || "").toLowerCase();
 
   if (s.includes("unit test")) return "badge-status-testing";
+  if (s.includes("waiting")) return "badge-status-waiting";
+  if (s.includes("in estimation") || (s.includes("estimation") && !s.includes("complete"))) {
+    return "badge-status-estimation";
+  }
   if (s.includes("in progress") || cat.includes("indeterminate")) return "badge-status-progress";
   if (s.includes("to do") || s === "new" || cat.includes("new")) return "badge-status-todo";
   if (s.includes("done") || s.includes("complete") || cat.includes("done")) return "badge-status-done";
@@ -27,6 +38,19 @@ function statusBadge(category?: string, status?: string): string {
   if (cat.includes("progress")) return "badge-status-progress";
   if (cat.includes("todo")) return "badge-status-todo";
   return "badge-status-todo";
+}
+
+function statusRowBorder(status?: string): string {
+  const s = (status || "").toLowerCase();
+
+  if (s.includes("unit test")) return "border-l-[3px] border-l-purple-500";
+  if (s.includes("waiting")) return "border-l-[3px] border-l-orange-500";
+  if (s.includes("in estimation") || (s.includes("estimation") && !s.includes("complete"))) {
+    return "border-l-[3px] border-l-blue-500";
+  }
+  if (s.includes("in progress")) return "border-l-[3px] border-l-amber-500";
+
+  return "border-l-[3px] border-l-transparent";
 }
 
 function PriorityLabel({ priority }: { priority?: string }) {
@@ -59,16 +83,16 @@ function DeliverArrow() {
 }
 
 const ACTION_BTN_BASE =
-  "inline-flex items-center justify-center gap-1.5 rounded-full px-4 py-1.5 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none opacity-90 group-hover:opacity-100";
+  "inline-flex items-center justify-center gap-1.5 rounded-lg px-3.5 py-1.5 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none";
 
 function deliverAction(status?: string): { label: string; showArrow: boolean; className: string } {
   const s = (status || "").toLowerCase().trim();
 
   const startDelivery = `${ACTION_BTN_BASE} bg-blue-600 text-white hover:bg-blue-700 focus-visible:ring-blue-500`;
-  const continueStyle = `${ACTION_BTN_BASE} border border-blue-400 text-blue-600 bg-transparent hover:bg-blue-50 focus-visible:ring-blue-400`;
+  const continueStyle = `${ACTION_BTN_BASE} border border-slate-300 text-slate-700 bg-white hover:bg-slate-50 hover:border-slate-400 focus-visible:ring-slate-400`;
   const reviewPr = `${ACTION_BTN_BASE} bg-blue-600 text-white hover:bg-blue-700 focus-visible:ring-blue-500`;
   const verify = `${ACTION_BTN_BASE} bg-amber-500 text-white hover:bg-amber-600 focus-visible:ring-amber-500`;
-  const viewSummary = `${ACTION_BTN_BASE} border border-slate-300 text-slate-400 bg-transparent hover:bg-slate-50 focus-visible:ring-slate-400`;
+  const viewSummary = `${ACTION_BTN_BASE} border border-slate-300 text-slate-500 bg-white hover:bg-slate-50 focus-visible:ring-slate-400`;
 
   if (s === "to do" || s === "new") {
     return { label: "Start Delivery", showArrow: true, className: startDelivery };
@@ -126,9 +150,9 @@ export default function IssueTable({
 
   if (loading) {
     return (
-      <div className="px-6 py-6 space-y-3">
+      <div className="px-5 py-6 space-y-3">
         {[...Array(8)].map((_, i) => (
-          <div key={i} className="h-11 skeleton" />
+          <div key={i} className="h-[52px] skeleton" />
         ))}
       </div>
     );
@@ -136,17 +160,17 @@ export default function IssueTable({
 
   return (
     <div>
-      <div className="overflow-x-auto pl-2">
+      <div className="overflow-x-auto">
         <table className="w-full text-[15px]">
           <thead>
-            <tr className="border-b border-slate-200 bg-slate-50/80">
-              <th className="table-header">Key</th>
+            <tr className="border-b border-slate-200 bg-slate-50/60">
+              <th className="table-header w-[130px]">Key</th>
               <th className="table-header">Summary</th>
               <th className="table-header hidden md:table-cell">Status</th>
               <th className="table-header hidden lg:table-cell">Priority</th>
               <th className="table-header hidden lg:table-cell">Assignee</th>
               <th className="table-header hidden sm:table-cell">Updated</th>
-              {onDeliver && <th className="table-header text-right">Action</th>}
+              {onDeliver && <th className="table-header text-right w-[140px]">Action</th>}
             </tr>
           </thead>
           <tbody>
@@ -155,37 +179,44 @@ export default function IssueTable({
               return (
               <tr
                 key={issue.id}
-                className={`group transition-colors hover:bg-slate-50/50 ${
-                  index % 2 === 0 ? "bg-white" : "bg-brand-50/20"
+                className={`group transition-colors hover:bg-slate-50/80 ${statusRowBorder(issue.status)} ${
+                  index % 2 === 0 ? "bg-white" : "bg-[#f9fafb]"
                 }`}
               >
-                <td className="px-6 py-3.5 border-b border-slate-100">
+                <td className="px-5 h-[52px] border-b border-slate-100 w-[130px]">
                   <div className="flex items-center gap-2 min-w-0">
                     <IssueTypeIcon name={issue.issue_type} iconUrl={issue.issue_type_icon} />
-                    <a
-                      href={siteUrl ? `${siteUrl}/browse/${issue.key}` : `#`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="font-mono text-sm font-medium text-blue-600 hover:text-blue-800 transition-colors truncate"
-                    >
-                      {issue.key}
-                    </a>
+                    <div className="min-w-0">
+                      <a
+                        href={siteUrl ? `${siteUrl}/browse/${issue.key}` : `#`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-mono text-sm font-medium text-blue-600 hover:text-blue-800 transition-colors truncate block"
+                      >
+                        {issue.key}
+                      </a>
+                      {issue.issue_type && (
+                        <span className="block text-[10px] font-medium text-slate-500 truncate">
+                          {displayIssueType(issue.issue_type)}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </td>
-                <td className="px-6 py-3.5 max-w-xs border-b border-slate-100">
-                  <span className="block truncate text-slate-800 font-normal" title={issue.summary}>
+                <td className="px-5 h-[52px] max-w-xs border-b border-slate-100">
+                  <span className="block truncate text-slate-800 font-medium" title={issue.summary}>
                     {issue.summary}
                   </span>
                 </td>
-                <td className="px-6 py-3.5 hidden md:table-cell border-b border-slate-100">
+                <td className="px-5 h-[52px] hidden md:table-cell border-b border-slate-100">
                   <span className={statusBadge(issue.status_category, issue.status)}>
                     {issue.status || "—"}
                   </span>
                 </td>
-                <td className="px-6 py-3.5 hidden lg:table-cell border-b border-slate-100">
+                <td className="px-5 h-[52px] hidden lg:table-cell border-b border-slate-100">
                   <PriorityLabel priority={issue.priority} />
                 </td>
-                <td className="px-6 py-3.5 hidden lg:table-cell border-b border-slate-100">
+                <td className="px-5 h-[52px] hidden lg:table-cell border-b border-slate-100">
                   <div className="flex items-center gap-2.5">
                     {issue.assignee_avatar ? (
                       <img
@@ -204,13 +235,13 @@ export default function IssueTable({
                   </div>
                 </td>
                 <td
-                  className="px-6 py-3.5 text-slate-600 text-sm font-normal hidden sm:table-cell border-b border-slate-100"
+                  className="px-5 h-[52px] text-slate-500 text-sm font-normal hidden sm:table-cell border-b border-slate-100"
                   title={formatFullDate(issue.updated)}
                 >
                   {formatRelativeTime(issue.updated)}
                 </td>
                 {onDeliver && action && (
-                  <td className="px-6 py-3.5 text-right border-b border-slate-100">
+                  <td className="px-5 h-[52px] text-right border-b border-slate-100 w-[140px]">
                     <button
                       onClick={() => onDeliver(issue)}
                       className={action.className}

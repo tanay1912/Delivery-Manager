@@ -600,6 +600,21 @@ def _strip_unsettable_transition_fields(fields: dict | None, unsettable: set[str
     return filtered or None
 
 
+def _strip_custom_transition_fields(transition: dict, fields: dict | None) -> dict | None:
+    """Drop custom fields from a transition payload — last resort before a bare transition."""
+    if not fields:
+        return None
+    field_meta = transition.get("fields") or {}
+    filtered: dict = {}
+    for field_id, value in fields.items():
+        meta = field_meta.get(field_id) or {}
+        schema = meta.get("schema") or {}
+        if schema.get("custom") or str(field_id).startswith("customfield_"):
+            continue
+        filtered[field_id] = value
+    return filtered or None
+
+
 def _default_transition_field_value(meta: dict) -> dict | str | None:
     schema = meta.get("schema") or {}
     schema_type = str(schema.get("type") or "").lower()
@@ -1077,6 +1092,14 @@ def _step_completed(run: DeliveryRun, step: str) -> bool:
         if isinstance(entry, dict) and entry.get("step") == step and entry.get("status") == "completed":
             return True
     return False
+
+
+def _step_resolved(run: DeliveryRun, step: str) -> bool:
+    """True when a step finished successfully or was intentionally skipped."""
+    status = _latest_step_status(run, step)
+    if status == "failed" and step in ("transition_in_testing", "transition_in_progress"):
+        return True
+    return status in ("completed", "skipped")
 
 
 def _verification_screenshot_path(run_id: uuid.UUID, environment: str) -> Path:
@@ -1706,6 +1729,9 @@ async def _transition_issue(
     try:
         await _post_jira_transition(jira, issue_key, transition["id"], merged_fields)
     except Exception as exc:
+        unsettable = _parse_jira_unsettable_fields(exc)
+        expanded_skip = set(skip_field_ids or set()) | unsettable
+
         retry_fields = await filter_settable_transition_fields(
             jira,
             issue_key,
@@ -1719,25 +1745,31 @@ async def _transition_issue(
                         issue_key,
                         transition,
                         merged_fields or {},
-                        skip_field_ids=skip_field_ids,
+                        skip_field_ids=expanded_skip,
                     ),
                 ),
-                skip_field_ids=skip_field_ids,
+                skip_field_ids=expanded_skip,
             ),
         )
-        if retry_fields != (merged_fields or {}):
+
+        for fields_attempt in (
+            retry_fields,
+            _strip_custom_transition_fields(transition, retry_fields or merged_fields),
+            None,
+        ):
+            if fields_attempt == (merged_fields or {}):
+                continue
             try:
-                await _post_jira_transition(jira, issue_key, transition["id"], retry_fields)
+                await _post_jira_transition(jira, issue_key, transition["id"], fields_attempt)
                 return transition["name"]
             except Exception as retry_exc:
                 exc = retry_exc
-        elif merged_fields:
-            try:
-                await _post_jira_transition(jira, issue_key, transition["id"], None)
-                return transition["name"]
-            except Exception as bare_exc:
-                exc = bare_exc
-        missing = _unfilled_required_transition_fields(transition, retry_fields if retry_fields != (merged_fields or {}) else merged_fields)
+                expanded_skip |= _parse_jira_unsettable_fields(retry_exc)
+
+        missing = _unfilled_required_transition_fields(
+            transition,
+            retry_fields if retry_fields != (merged_fields or {}) else merged_fields,
+        )
         detail = f" Missing required fields: {', '.join(missing)}." if missing else ""
         raise PipelineError(
             f"Jira transition to {transition_name} failed: {exc}.{detail}"
@@ -2063,15 +2095,41 @@ async def start_implementation(
             result = await _step_write_impact_analysis(db, run, jira, ctx, session)
             await _complete_step(db, run, ctx, "impact_analysis", result[0], result[1] or None)
 
-        if not _step_completed(run, "transition_in_progress"):
-            new_status = await ensure_in_progress_status(
-                jira,
-                run.jira_issue_key,
-                ctx.get("status_name"),
-            )
-            ctx["status_name"] = new_status
-            await _persist_context(db, run, ctx)
-            await _log_step(db, run, "transition_in_progress", "completed", f"Status: {new_status}")
+        if not _step_resolved(run, "transition_in_progress"):
+            try:
+                new_status = await ensure_in_progress_status(
+                    jira,
+                    run.jira_issue_key,
+                    ctx.get("status_name"),
+                )
+                ctx["status_name"] = new_status
+                await _persist_context(db, run, ctx)
+                await _log_step(db, run, "transition_in_progress", "completed", f"Status: {new_status}")
+            except Exception:
+                try:
+                    snapshot = await _fetch_issue_snapshot(jira, run.jira_issue_key)
+                    ctx["status_name"] = snapshot["status_name"]
+                    ctx["jira_synced_at"] = datetime.now(timezone.utc).isoformat()
+                except Exception:
+                    pass
+                if _is_in_progress_status(str(ctx.get("status_name") or "")):
+                    await _persist_context(db, run, ctx)
+                    await _log_step(
+                        db,
+                        run,
+                        "transition_in_progress",
+                        "completed",
+                        f"Status: {ctx['status_name']}",
+                    )
+                else:
+                    await _persist_context(db, run, ctx)
+                    await _log_step(
+                        db,
+                        run,
+                        "transition_in_progress",
+                        "skipped",
+                        "Jira status transition skipped; continuing implementation",
+                    )
 
         if not _step_completed(run, "resolve_mapping"):
             result = await _step_resolve_mapping(db, run, jira, ctx)
@@ -2766,8 +2824,25 @@ async def _transition_to_in_testing_after_merge(
     jira: JiraClient,
     ctx: dict,
 ) -> dict:
-    if _is_in_testing_status(str(ctx.get("status_name") or "")):
+    if _step_resolved(run, "transition_in_testing"):
         return ctx
+
+    try:
+        snapshot = await _fetch_issue_snapshot(jira, run.jira_issue_key)
+        ctx["status_name"] = snapshot["status_name"]
+    except Exception:
+        pass
+
+    if _is_in_testing_status(str(ctx.get("status_name") or "")):
+        await _log_step(
+            db,
+            run,
+            "transition_in_testing",
+            "completed",
+            f"Status: {ctx['status_name']}",
+        )
+        return ctx
+
     try:
         new_status = await ensure_in_testing_status(
             jira,
@@ -2783,8 +2858,28 @@ async def _transition_to_in_testing_after_merge(
             "completed",
             f"Status: {new_status}",
         )
-    except Exception as exc:
-        await _log_step(db, run, "transition_in_testing", "failed", str(exc))
+    except Exception:
+        try:
+            snapshot = await _fetch_issue_snapshot(jira, run.jira_issue_key)
+            ctx["status_name"] = snapshot["status_name"]
+            if _is_in_testing_status(snapshot["status_name"]):
+                await _log_step(
+                    db,
+                    run,
+                    "transition_in_testing",
+                    "completed",
+                    f"Status: {snapshot['status_name']}",
+                )
+                return ctx
+        except Exception:
+            pass
+        await _log_step(
+            db,
+            run,
+            "transition_in_testing",
+            "skipped",
+            "Jira status transition skipped; continuing with verification",
+        )
     return ctx
 
 
@@ -2845,7 +2940,7 @@ async def _continue_merge_flow_after_deploy(
     env_label = "Staging" if target == "beta" else "Live"
     verify_step = "verify_beta" if target == "beta" else "verify_master"
 
-    if target == "beta" and _step_completed(run, "deploy_beta"):
+    if target == "beta" and _step_completed(run, "deploy_beta") and not _step_resolved(run, "transition_in_testing"):
         ctx = await _transition_to_in_testing_after_merge(db, run, jira, ctx)
         run.context_data = ctx
         await db.commit()

@@ -22,12 +22,12 @@ function StepCircle({
   status: StepStatus;
   selected: boolean;
 }) {
-  const selectedRing = selected ? "ring-2 ring-blue-600 ring-offset-2" : "";
+  const selectedRing = selected ? "ring-2 ring-brand-600 ring-offset-2" : "";
 
   if (status === "completed") {
     return (
       <span
-        className={`flex h-10 w-10 items-center justify-center rounded-full bg-green-500 text-white shadow-sm ${selectedRing}`}
+        className={`flex h-10 w-10 items-center justify-center rounded-full bg-brand-600 text-white shadow-sm ${selectedRing}`}
       >
         <svg className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
           <path
@@ -42,8 +42,8 @@ function StepCircle({
   if (status === "active") {
     return (
       <span
-        className={`flex h-10 w-10 items-center justify-center rounded-full bg-blue-600 text-white text-sm font-bold shadow-sm ${
-          selected ? "ring-2 ring-blue-600 ring-offset-2" : "ring-2 ring-blue-300 ring-offset-2 animate-pulse"
+        className={`flex h-10 w-10 items-center justify-center rounded-full bg-brand-600 text-white text-sm font-bold shadow-sm ${
+          selected ? "ring-2 ring-brand-600 ring-offset-2" : "ring-2 ring-brand-300 ring-offset-2 animate-pulse"
         }`}
       >
         {number}
@@ -52,7 +52,7 @@ function StepCircle({
   }
   return (
     <span
-      className={`flex h-10 w-10 items-center justify-center rounded-full border-2 border-blue-200 bg-white text-sm font-semibold text-blue-400 ${selectedRing}`}
+      className={`flex h-10 w-10 items-center justify-center rounded-full border-2 border-brand-200 bg-white text-sm font-semibold text-brand-400 ${selectedRing}`}
     >
       {number}
     </span>
@@ -62,7 +62,7 @@ function StepCircle({
 function Connector({ completed }: { completed: boolean }) {
   return (
     <div
-      className={`flex-1 h-0.5 min-w-[1rem] ${completed ? "bg-emerald-500" : "bg-blue-100"}`}
+      className={`flex-1 h-0.5 min-w-[1rem] ${completed ? "bg-brand-400" : "bg-brand-100"}`}
       aria-hidden="true"
     />
   );
@@ -84,11 +84,11 @@ export default function PipelineStepper({
           const isNavigable = step.number <= maxNavigableStep && onStepSelect != null;
           const labelClass =
             isSelected
-              ? "font-bold text-blue-700"
+              ? "font-bold text-brand-700"
               : step.status === "active"
-                ? "font-bold text-blue-600"
+                ? "font-bold text-brand-600"
                 : step.status === "completed"
-                  ? "text-green-600"
+                  ? "text-brand-600"
                   : "text-slate-400";
 
           return (
@@ -98,7 +98,7 @@ export default function PipelineStepper({
                   <button
                     type="button"
                     onClick={() => onStepSelect(step.number)}
-                    className="rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+                    className="rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2"
                     aria-current={isSelected ? "step" : undefined}
                     aria-label={`${step.label}${isSelected ? " (current view)" : ""}`}
                   >

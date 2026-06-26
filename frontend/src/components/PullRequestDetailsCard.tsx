@@ -51,12 +51,12 @@ const statusStyles: Record<PrStatusVariant, { card: string; status: string }> = 
     status: "bg-red-50 border border-red-200 text-red-800",
   },
   success: {
-    card: "border-l-4 border-green-500",
-    status: "bg-green-50 border border-green-200 text-green-800",
+    card: "border-l-4 border-brand-400",
+    status: "bg-brand-50 border border-brand-200 text-brand-800",
   },
   progress: {
-    card: "border-l-4 border-blue-500",
-    status: "bg-blue-50 border border-blue-200 text-blue-800",
+    card: "border-l-4 border-brand-500",
+    status: "bg-brand-50 border border-brand-200 text-brand-800",
   },
   neutral: {
     card: "border-l-4 border-gray-300",
@@ -106,7 +106,7 @@ function PrCard({
                 type="button"
                 onClick={onDeploy}
                 disabled={deployDisabled || isDeploying}
-                className="block w-full sm:w-auto rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                className="btn-primary btn-sm w-full sm:w-auto"
               >
                 {isDeploying ? "Deploying…" : "Deploy Now"}
               </button>
@@ -121,7 +121,7 @@ function PrCard({
           <span className="font-medium text-slate-600">Status:</span>{" "}
           <span className="font-semibold inline-flex items-center gap-1.5">
             {status.showSpinner && (
-              <span className="h-3.5 w-3.5 rounded-full border-2 border-blue-300 border-t-blue-600 animate-spin flex-shrink-0" />
+              <span className="h-3.5 w-3.5 rounded-full border-2 border-brand-300 border-t-brand-600 animate-spin flex-shrink-0" />
             )}
             {status.emoji ? `${status.emoji} ` : ""}
             {status.label}
@@ -196,7 +196,7 @@ export default function PullRequestDetailsCard({
             Feature Branch
           </p>
           <div className="flex items-start gap-3">
-            <code className="flex-1 min-w-0 bg-gray-900 text-green-400 rounded-lg px-3 py-2 text-xs font-mono break-all">
+            <code className="flex-1 min-w-0 bg-gray-900 text-sky-300 rounded-lg px-3 py-2 text-xs font-mono break-all">
               {run.branch_name}
             </code>
             <CopyBranchButton branchName={run.branch_name} />

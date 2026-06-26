@@ -1,6 +1,4 @@
 import { Link, useLocation } from "react-router-dom";
-import { useDashboardProjects } from "../context/DashboardProjectContext";
-import ProjectList from "./ProjectList";
 
 interface NavItem {
   to: string;
@@ -175,14 +173,15 @@ function SidebarLink({ item, pathname }: { item: NavItem; pathname: string }) {
       className={`sidebar-nav-item group ${active ? "sidebar-nav-item-active" : ""}`}
     >
       <span className={`sidebar-nav-icon ${active ? "sidebar-nav-icon-active" : ""}`}>{item.icon}</span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate font-medium">{item.label}</span>
+      <span className="flex-1 min-w-0">
+        <span className="block text-[13px] font-semibold leading-snug tracking-tight">{item.label}</span>
         {item.description && (
-          <span className={`block truncate text-[11px] mt-0.5 ${active ? "text-brand-700/80" : "text-slate-500"}`}>
+          <span className={`block text-xs leading-relaxed mt-0.5 ${active ? "text-brand-600/90" : "text-slate-500"}`}>
             {item.description}
           </span>
         )}
       </span>
+      {active && <span className="sidebar-nav-active-dot" aria-hidden="true" />}
     </Link>
   );
 }
@@ -195,80 +194,64 @@ function SidebarSubLink({ item, pathname }: { item: NavItem; pathname: string })
       className={`sidebar-subnav-item ${active ? "sidebar-subnav-item-active" : ""}`}
     >
       <span className="sidebar-subnav-icon">{item.icon}</span>
-      <span className="truncate">{item.label}</span>
+      <span className="text-sm leading-snug">{item.label}</span>
     </Link>
+  );
+}
+
+function ShieldIcon() {
+  return (
+    <svg className="h-3.5 w-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth={1.75}
+        d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"
+      />
+    </svg>
   );
 }
 
 export default function AppSidebar() {
   const { pathname } = useLocation();
   const settingsActive = pathname.startsWith("/settings");
-  const showProjectList = pathname === "/dashboard" || pathname === "/history";
-  const dashboardProjects = useDashboardProjects();
 
   return (
-    <aside className="app-sidebar flex flex-col w-64 flex-shrink-0 border-r border-slate-200/90 bg-surface-muted/95 backdrop-blur-sm">
-      <nav className="flex-1 overflow-y-auto py-4 px-3 space-y-6" aria-label="Main navigation">
+    <aside className="app-sidebar flex flex-col w-[300px] flex-shrink-0">
+      <div className="sidebar-header flex-shrink-0">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">Navigation</p>
+      </div>
+
+      <nav className="sidebar-scroll flex-1 px-3 pb-4" aria-label="Main navigation">
         <div>
           <p className="sidebar-section-label">Work</p>
-          <div className="space-y-0.5 mt-2">
+          <div className="mt-1.5 space-y-0.5">
             {WORK_NAV.map((item) => (
               <SidebarLink key={item.to} item={item} pathname={pathname} />
             ))}
           </div>
         </div>
 
-        {showProjectList && dashboardProjects && (
-          <div className="flex flex-col min-h-0">
-            <p className="sidebar-section-label">Configured projects</p>
-            <div className="mt-2 rounded-xl border border-slate-200/90 bg-white overflow-hidden flex flex-col max-h-[min(24rem,40vh)] shadow-sm">
-              <div className="px-3 py-2.5 border-b border-slate-200/70 bg-surface-muted/80 flex-shrink-0">
-                <p className="text-xs text-slate-500">
-                  {dashboardProjects.projectsLoading && dashboardProjects.projects.length === 0
-                    ? "Loading..."
-                    : `${dashboardProjects.projectsTotal} linked to Bitbucket`}
-                </p>
-              </div>
-              <div className="flex-1 min-h-0 overflow-hidden">
-                <ProjectList
-                  projects={dashboardProjects.projects}
-                  selectedKey={dashboardProjects.selectedProject}
-                  loading={dashboardProjects.projectsLoading}
-                  total={dashboardProjects.projectsTotal}
-                  onSelect={dashboardProjects.onSelect}
-                  onSearch={dashboardProjects.onSearch}
-                  emptyMessage={
-                    dashboardProjects.mappedProjectKeys.size === 0
-                      ? "No projects are linked to Bitbucket yet."
-                      : "No configured projects match your search."
-                  }
-                  configureHref="/settings"
-                  showMappingSettings
-                />
-              </div>
-            </div>
-          </div>
-        )}
-
-        <div>
+        <div className="sidebar-section-divider">
           <p className="sidebar-section-label">Settings</p>
-          <div className="space-y-0.5 mt-2">
+          <div className="mt-1.5 space-y-0.5">
             {SETTINGS_NAV.map((item) => (
               <SidebarSubLink key={item.to} item={item} pathname={pathname} />
             ))}
           </div>
           {settingsActive && (
-            <p className="mt-3 mx-2 text-[11px] text-slate-500 leading-relaxed">
+            <p className="sidebar-settings-hint">
               Connect integrations and configure how deliveries run.
             </p>
           )}
         </div>
       </nav>
 
-      <div className="flex-shrink-0 px-4 py-4 border-t border-slate-200/80 bg-surface-subtle/80">
-        <p className="text-[11px] text-slate-500 leading-relaxed">
-          Credentials are encrypted per session and cleared on logout.
-        </p>
+      <div className="sidebar-footer flex-shrink-0">
+        <div className="sidebar-credentials-note">
+          <ShieldIcon />
+          <span>Credentials are encrypted per session and cleared on logout.</span>
+        </div>
       </div>
     </aside>
   );

@@ -524,11 +524,67 @@ class JiraClient:
             data = response.json()
             return int(data.get("count", 0))
 
+    async def summarize_by_status(self, jql: str) -> dict[str, dict[str, int]]:
+        """Count issues grouped by workflow status and issue type."""
+        search_jql = jql.split(" ORDER BY ")[0].strip()
+        counts: dict[str, dict[str, int]] = {}
+        next_token: str | None = None
+
+        while True:
+            body: dict = {
+                "jql": search_jql,
+                "maxResults": 100,
+                "fields": ["status", "issuetype"],
+            }
+            if next_token:
+                body["nextPageToken"] = next_token
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/search/jql",
+                    json=body,
+                    auth=self._auth(),
+                    headers={**self._headers(), "Content-Type": "application/json"},
+                )
+                response.raise_for_status()
+                data = response.json()
+
+            for issue in data.get("issues", []):
+                fields = issue.get("fields") or {}
+                status = (fields.get("status") or {}).get("name") or "Unknown"
+                issue_type = (fields.get("issuetype") or {}).get("name") or ""
+                type_key = self._classify_issue_type(issue_type)
+
+                bucket = counts.setdefault(
+                    status,
+                    {"total": 0, "qis": 0, "bug": 0, "task": 0},
+                )
+                bucket["total"] += 1
+                bucket[type_key] += 1
+
+            if data.get("isLast", True):
+                break
+            next_token = data.get("nextPageToken")
+            if not next_token:
+                break
+
+        return counts
+
+    @staticmethod
+    def _classify_issue_type(name: str) -> str:
+        if name == "QIS":
+            return "qis"
+        if name == "Bug":
+            return "bug"
+        return "task"
+
     @staticmethod
     def build_jql(
         project_key: str | None = None,
         assigned_to_me: bool = True,
         status_category: str | None = None,
+        issue_type: str | None = None,
+        issue_types: list[str] | None = None,
         *,
         order_by_updated: bool = True,
     ) -> str:
@@ -539,6 +595,13 @@ class JiraClient:
             clauses.append(f'project = "{project_key}"')
         if status_category:
             clauses.append(f'statusCategory = "{status_category}"')
+        types = issue_types or ([issue_type] if issue_type else None)
+        if types:
+            if len(types) == 1:
+                clauses.append(f'issuetype = "{types[0]}"')
+            else:
+                quoted = ", ".join(f'"{item}"' for item in types)
+                clauses.append(f"issuetype in ({quoted})")
         if not clauses:
             clauses.append("updated >= -365d")
         jql = " AND ".join(clauses)

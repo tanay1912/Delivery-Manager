@@ -102,7 +102,7 @@ function PendingVerificationReview({
         </div>
         <span
           className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${
-            pending.passed ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-800"
+            pending.passed ? "bg-brand-100 text-brand-700" : "bg-amber-100 text-amber-800"
           }`}
         >
           {pending.passed ? "Looks good" : "Needs review"}
@@ -157,7 +157,7 @@ function PendingVerificationReview({
           type="button"
           onClick={() => onPost(comment.trim())}
           disabled={disabled || posting || !comment.trim()}
-          className="rounded-lg bg-green-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-50 transition-colors"
+          className="btn-primary"
         >
           {posting ? "Posting to Jira…" : "Post comment & screenshot to Jira"}
         </button>
@@ -171,7 +171,7 @@ function CompletedVerificationItem({ item }: { item: WebsiteVerification }) {
     <div className="rounded-lg border border-gray-200 bg-white p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="font-semibold text-slate-900">Verify {item.environment} website</span>
-        <span className="rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-semibold text-green-700">
+        <span className="rounded-full bg-brand-100 px-2.5 py-0.5 text-xs font-semibold text-brand-700">
           Posted to Jira
         </span>
       </div>

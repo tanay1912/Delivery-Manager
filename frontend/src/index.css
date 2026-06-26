@@ -138,19 +138,27 @@
   }
 
   .badge-status-progress {
-    @apply badge bg-blue-100 text-blue-800 ring-blue-600/20;
+    @apply inline-flex items-center rounded-full bg-blue-50 text-blue-700 border border-blue-200/80 text-xs font-medium px-2.5 py-0.5;
   }
 
   .badge-status-todo {
-    @apply badge bg-slate-200/80 text-slate-700 ring-slate-500/15;
+    @apply inline-flex items-center rounded-full bg-slate-100 text-slate-600 border border-slate-200/80 text-xs font-medium px-2.5 py-0.5;
   }
 
   .badge-status-testing {
-    @apply badge bg-orange-100 text-orange-800 ring-orange-600/25;
+    @apply inline-flex items-center rounded-full bg-purple-50 text-purple-700 border border-purple-200/80 text-xs font-medium px-2.5 py-0.5;
+  }
+
+  .badge-status-estimation {
+    @apply inline-flex items-center rounded-full bg-blue-50 text-blue-700 border border-blue-200/80 text-xs font-medium px-2.5 py-0.5;
+  }
+
+  .badge-status-waiting {
+    @apply inline-flex items-center rounded-full bg-orange-50 text-orange-700 border border-orange-200/80 text-xs font-medium px-2.5 py-0.5;
   }
 
   .badge-status-done {
-    @apply badge bg-emerald-100 text-emerald-800 ring-emerald-600/20;
+    @apply inline-flex items-center rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200/80 text-xs font-medium px-2.5 py-0.5;
   }
 
   .btn-deliver {
@@ -158,7 +166,7 @@
   }
 
   .table-header {
-    @apply text-left px-6 py-3.5 text-[11px] font-medium uppercase tracking-[0.08em] text-slate-500;
+    @apply text-left px-5 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500;
   }
 
   .tab-list {
@@ -214,42 +222,85 @@
   }
 
   .app-sidebar {
-    @apply hidden lg:flex;
+    @apply hidden lg:flex border-r border-slate-200/70 bg-gradient-to-b from-white via-surface-muted to-slate-50/90 shadow-[inset_-1px_0_0_rgb(255_255_255_/_0.6)];
+  }
+
+  .sidebar-header {
+    @apply px-5 pt-5 pb-3;
   }
 
   .sidebar-section-label {
-    @apply px-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400;
+    @apply px-3 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500;
+  }
+
+  .sidebar-section-divider {
+    @apply mt-7 pt-7 border-t border-slate-200/60;
+  }
+
+  .sidebar-settings-hint {
+    @apply mt-3 mx-1 px-3 py-2.5 rounded-lg text-xs text-slate-500 leading-relaxed bg-slate-100/60 border border-slate-200/50;
+  }
+
+  .sidebar-scroll {
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgb(203 213 225) transparent;
+  }
+
+  .sidebar-scroll::-webkit-scrollbar {
+    width: 5px;
+  }
+
+  .sidebar-scroll::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .sidebar-scroll::-webkit-scrollbar-thumb {
+    background-color: rgb(203 213 225);
+    border-radius: 9999px;
+  }
+
+  .sidebar-footer {
+    @apply px-4 py-4 border-t border-slate-200/60 bg-white/50 backdrop-blur-sm;
+  }
+
+  .sidebar-credentials-note {
+    @apply flex items-start gap-2 text-[11px] text-slate-400 leading-relaxed;
   }
 
   .sidebar-nav-item {
-    @apply flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-all text-slate-600 hover:bg-slate-50 hover:text-slate-900;
+    @apply relative flex items-start gap-3 rounded-xl px-3 py-2.5 text-sm transition-all duration-150 text-slate-600 hover:bg-white/80 hover:text-slate-900 hover:shadow-sm hover:ring-1 hover:ring-slate-200/60;
   }
 
   .sidebar-nav-item-active {
-    @apply bg-brand-50 text-brand-700 ring-1 ring-brand-200/60 hover:bg-brand-50 hover:text-brand-700;
+    @apply text-brand-700 bg-white shadow-sm ring-1 ring-brand-200/50 hover:bg-white hover:text-brand-700 hover:ring-brand-200/60;
   }
 
   .sidebar-nav-icon {
-    @apply flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-500 transition-colors;
+    @apply flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-slate-100/90 text-slate-500 transition-all duration-150 group-hover:bg-slate-200/70 group-hover:text-slate-600;
   }
 
   .sidebar-nav-icon-active {
-    @apply bg-brand-100 text-brand-600;
+    @apply bg-brand-100 text-brand-600 shadow-sm ring-1 ring-brand-200/40 group-hover:bg-brand-100 group-hover:text-brand-600;
+  }
+
+  .sidebar-nav-active-dot {
+    @apply absolute right-3 top-1/2 -translate-y-1/2 h-1.5 w-1.5 rounded-full bg-brand-500 shadow-[0_0_0_3px_rgb(59_130_246_/_0.15)];
   }
 
   .sidebar-subnav-item {
-    @apply flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-all text-slate-600 hover:bg-slate-50 hover:text-slate-900;
+    @apply flex items-center gap-2.5 rounded-xl px-3 py-2 text-[13px] font-medium transition-all duration-150 text-slate-600 hover:bg-white/80 hover:text-slate-900 hover:shadow-sm hover:ring-1 hover:ring-slate-200/60;
   }
 
   .sidebar-subnav-item-active {
-    @apply bg-brand-50 text-brand-800 font-semibold ring-1 ring-brand-200/50;
+    @apply text-brand-700 font-semibold bg-white shadow-sm ring-1 ring-brand-200/50 hover:bg-white hover:text-brand-700;
   }
 
   .sidebar-subnav-icon {
-    @apply flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md text-slate-400;
+    @apply flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md bg-transparent text-slate-400 transition-colors;
   }
 
   .sidebar-subnav-item-active .sidebar-subnav-icon {
-    @apply text-brand-600;
+    @apply bg-brand-50 text-brand-600 ring-1 ring-brand-100;
   }
 }

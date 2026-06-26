@@ -9,7 +9,7 @@ interface CollapsedStepCardProps {
 
 function CheckIcon() {
   return (
-    <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-green-500 text-white">
+    <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-brand-600 text-white">
       <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
         <path
           fillRule="evenodd"

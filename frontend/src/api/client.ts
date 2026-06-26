@@ -115,11 +115,23 @@ export interface IssuesResponse {
   max_results: number;
 }
 
+export interface StatusBreakdown {
+  total: number;
+  qis?: number;
+  bug?: number;
+  task?: number;
+}
+
 export interface IssueSummary {
   total: number;
-  todo: number;
-  in_progress: number;
-  done: number;
+  by_status?: Record<string, StatusBreakdown>;
+  qis?: number;
+  bug?: number;
+  task?: number;
+}
+
+export interface ProjectSummariesResponse {
+  summaries: Record<string, IssueSummary>;
 }
 
 export interface Mapping {
@@ -497,6 +509,16 @@ export const api = {
     const params = new URLSearchParams({ assigned_to_me: String(assignedToMe) });
     if (project) params.set("project", project);
     return request<IssueSummary>(`/api/issues/summary?${params}`);
+  },
+  getProjectSummaries: (projectKeys: string[], assignedToMe = true) => {
+    if (projectKeys.length === 0) {
+      return Promise.resolve({ summaries: {} } as ProjectSummariesResponse);
+    }
+    const params = new URLSearchParams({
+      projects: projectKeys.join(","),
+      assigned_to_me: String(assignedToMe),
+    });
+    return request<ProjectSummariesResponse>(`/api/issues/project-summaries?${params}`);
   },
   getMappings: () => request<MappingsResponse>("/api/mappings"),
   createMapping: (body: MappingInput) =>

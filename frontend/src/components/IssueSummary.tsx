@@ -1,5 +1,5 @@
-import { ReactNode } from "react";
-import { IssueSummary as IssueSummaryData } from "../api/client";
+import { IssueSummary as IssueSummaryData, StatusBreakdown } from "../api/client";
+import { issueTypeItems, statusSummaryAccent, statusSummaryItems } from "../utils/statusSummary";
 
 interface IssueSummaryProps {
   summary: IssueSummaryData | null;
@@ -7,103 +7,111 @@ interface IssueSummaryProps {
   projectLabel: string;
 }
 
-const STAT_CONFIG: Record<
-  string,
-  { tint: string; borderHover: string; iconBg: string; icon: ReactNode }
-> = {
-  Total: {
-    tint: "bg-brand-50",
-    borderHover: "hover:border-brand-300",
-    iconBg: "bg-brand-100 text-brand-600",
-    icon: (
-      <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-      </svg>
-    ),
-  },
-  "To Do": {
-    tint: "bg-[#f9fafb]",
-    borderHover: "hover:border-slate-300",
-    iconBg: "bg-slate-200 text-slate-600",
-    icon: (
-      <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-        <circle cx="12" cy="12" r="9" strokeWidth={1.75} />
-      </svg>
-    ),
-  },
-  "In Progress": {
-    tint: "bg-[#eff6ff]",
-    borderHover: "hover:border-blue-300",
-    iconBg: "bg-blue-100 text-blue-600",
-    icon: (
-      <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-      </svg>
-    ),
-  },
-  Done: {
-    tint: "bg-[#f0fdf4]",
-    borderHover: "hover:border-emerald-300",
-    iconBg: "bg-emerald-100 text-emerald-600",
-    icon: (
-      <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-      </svg>
-    ),
-  },
+const STAT_ACCENT: Record<string, string> = {
+  Total: "border-blue-500",
 };
 
-function StatCard({
+function IssueTypeBadges({ breakdown }: { breakdown?: StatusBreakdown }) {
+  const types = issueTypeItems(breakdown);
+
+  if (types.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {types.map((type) => (
+        <span
+          key={type.label}
+          className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ring-1 ${type.badgeClass}`}
+        >
+          {type.label}
+          <span className="tabular-nums">{type.value}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function StatItem({
   label,
   value,
+  breakdown,
   loading,
+  showDivider,
 }: {
   label: string;
   value: number;
+  breakdown?: StatusBreakdown;
   loading: boolean;
+  showDivider: boolean;
 }) {
-  const config = STAT_CONFIG[label] ?? STAT_CONFIG.Total;
+  const accent = STAT_ACCENT[label] ?? statusSummaryAccent(label);
+  const showIssueTypes = label !== "Total";
+
+  const isTotal = label === "Total";
 
   return (
     <div
-      className={`rounded-2xl border border-slate-200/80 px-5 py-5 flex items-center gap-4 min-w-0 shadow-sm transition-all duration-200 hover:shadow-card-hover hover:-translate-y-0.5 ${config.tint} ${config.borderHover}`}
+      className={`flex items-center py-3 ${
+        isTotal
+          ? "flex-none shrink-0 w-max px-3"
+          : "flex-1 basis-0 min-w-[9.5rem] px-4 sm:px-5"
+      } ${showDivider ? "border-l border-slate-200" : ""}`}
     >
-      <div className={`flex h-11 w-11 items-center justify-center rounded-xl flex-shrink-0 ${config.iconBg}`}>
-        {config.icon}
-      </div>
-      <div className="min-w-0">
-        <p className="text-xs font-medium uppercase tracking-wider text-slate-500">{label}</p>
+      <div className={`border-l-[3px] min-w-0 ${isTotal ? "pl-2 w-max" : "pl-3"} ${accent}`}>
         {loading ? (
-          <div className="h-9 w-14 skeleton mt-1.5" />
+          <div className={`skeleton ${isTotal ? "h-8 w-8" : "h-8 w-12"}`} />
         ) : (
-          <p className="text-3xl font-extrabold text-slate-900 tabular-nums tracking-tight leading-none mt-1">
+          <p
+            className={`font-bold text-slate-900 tabular-nums tracking-tight leading-none ${
+              isTotal ? "text-2xl" : "text-2xl sm:text-3xl"
+            }`}
+          >
             {value}
           </p>
         )}
+        <div className={`mt-1 flex flex-wrap items-center gap-1.5 ${isTotal ? "whitespace-nowrap" : ""}`}>
+          <p className="text-[11px] font-medium uppercase tracking-wider text-slate-500">{label}</p>
+          {showIssueTypes && <IssueTypeBadges breakdown={breakdown} />}
+        </div>
       </div>
     </div>
   );
 }
 
 export default function IssueSummary({ summary, loading, projectLabel }: IssueSummaryProps) {
-  const stats = [
-    { label: "Total", value: summary?.total ?? 0 },
-    { label: "To Do", value: summary?.todo ?? 0 },
-    { label: "In Progress", value: summary?.in_progress ?? 0 },
-    { label: "Done", value: summary?.done ?? 0 },
-  ];
+  const stats = statusSummaryItems(summary);
 
   return (
-    <div className="flex-shrink-0 mb-8">
-      <div className="mb-4">
-        <h2 className="text-lg font-semibold text-slate-900 tracking-tight">Ticket summary</h2>
-        <p className="text-sm text-slate-500 mt-0.5 font-normal">{projectLabel}</p>
+    <div className="flex-shrink-0 bg-white">
+      <div className="px-5 pt-4 pb-3">
+        <p className="text-xs font-medium text-slate-500 tracking-wide">
+          Ticket summary
+          <span className="text-slate-300 mx-2" aria-hidden="true">
+            ·
+          </span>
+          {projectLabel}
+        </p>
       </div>
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-        {stats.map((stat) => (
-          <StatCard key={stat.label} label={stat.label} value={stat.value} loading={loading} />
-        ))}
-      </div>
+      {loading ? (
+        <div className="border-t border-slate-200/80 px-5 py-3">
+          <div className="h-10 w-full max-w-lg skeleton rounded" />
+        </div>
+      ) : stats.length > 0 ? (
+        <div className="flex border-t border-slate-200/80 overflow-x-auto">
+          {stats.map((stat, index) => (
+            <StatItem
+              key={stat.label}
+              label={stat.label}
+              value={stat.value}
+              breakdown={stat.breakdown}
+              loading={false}
+              showDivider={index > 0}
+            />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
