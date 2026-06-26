@@ -60,7 +60,7 @@ export default function ProjectList({
   if (loading && projects.length === 0) {
     return (
       <div className="flex flex-col h-full min-h-0">
-        <div className="px-3 py-3 border-b border-slate-100 flex-shrink-0">
+        <div className="px-3 py-3 border-b border-slate-200/60 flex-shrink-0">
           <div className="h-10 skeleton" />
         </div>
         <div className="p-3 space-y-2 overflow-y-auto flex-1 min-h-0">
@@ -74,13 +74,14 @@ export default function ProjectList({
 
   return (
     <div className="flex flex-col h-full min-h-0">
-      <div className="px-3 py-3 border-b border-slate-100 flex-shrink-0">
+      <div className="px-3 py-3 border-b border-slate-200/60 flex-shrink-0">
         <div className="relative">
           <svg
-            className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400 pointer-events-none"
+            className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400 pointer-events-none"
             fill="none"
             viewBox="0 0 24 24"
             stroke="currentColor"
+            aria-hidden="true"
           >
             <path
               strokeLinecap="round"
@@ -94,7 +95,7 @@ export default function ProjectList({
             value={search}
             onChange={(e) => handleSearchChange(e.target.value)}
             placeholder="Search projects..."
-            className="input pl-9 py-2"
+            className="block w-full rounded-xl border border-slate-200/80 bg-white pl-10 pr-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 shadow-sm transition-colors focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
           />
         </div>
       </div>
@@ -104,7 +105,7 @@ export default function ProjectList({
           onClick={() => onSelect(null)}
           className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-medium transition-all mb-1 ${
             selectedKey === null
-              ? "bg-brand-50 text-brand-700 shadow-sm ring-1 ring-brand-200/60"
+              ? "bg-brand-50/80 text-brand-700 ring-1 ring-brand-200/40 border-l-[3px] border-brand-600"
               : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
           }`}
         >
@@ -117,7 +118,9 @@ export default function ProjectList({
             <li key={project.id}>
               <div
                 className={`flex items-center gap-1 rounded-xl transition-all ${
-                  isSelected ? "bg-brand-50 shadow-sm ring-1 ring-brand-200/60" : "hover:bg-slate-50"
+                  isSelected
+                    ? "bg-brand-50/80 ring-1 ring-brand-200/40 border-l-[3px] border-brand-600"
+                    : "hover:bg-slate-50"
                 }`}
               >
                 <button
@@ -179,7 +182,7 @@ export default function ProjectList({
       </div>
 
       {total !== undefined && (
-        <div className="px-4 py-2.5 border-t border-slate-100 text-xs text-slate-500 flex-shrink-0 bg-slate-50/50">
+        <div className="mt-auto px-4 py-3 border-t border-slate-200/80 text-xs text-slate-500 flex-shrink-0 bg-slate-50/60 font-medium">
           {filteredProjects.length === total
             ? `${total} project${total === 1 ? "" : "s"}`
             : `${filteredProjects.length} of ${total} projects`}

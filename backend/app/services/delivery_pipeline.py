@@ -7,7 +7,20 @@ from typing import Literal
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
+from app.auth.ai_credentials import (
+    cursor_api_key,
+    cursor_configured,
+    cursor_model,
+    openai_client_from_session,
+    openai_configured,
+)
+from app.auth.bitbucket_credentials import (
+    bitbucket_client_from_session,
+    bitbucket_configured,
+    bitbucket_git_credentials,
+)
 from app.auth.jira_credentials import jira_client_from_session
 from app.clients.bitbucket_client import BitbucketClient
 from app.clients.cursor_client import CursorDevelopmentError, run_implementation_agent, run_revision_agent
@@ -15,6 +28,17 @@ from app.clients.jira_client import JiraClient
 from app.clients.openai_client import OpenAIClient, slugify
 from app.config import settings
 from app.db.models import DeliveryRun, ProjectRepoMapping
+from app.services.deploy_commands import (
+    commands_need_bitbucket_auth,
+    deploy_commands_for_environment,
+    fetch_deploy_commands_from_db,
+)
+from app.services.repo_stack import probe_repository_stack
+from app.services.ssh_deploy import (
+    DeployError,
+    deploy_configured,
+    run_environment_deploy,
+)
 from app.services.website_verifier import verify_website
 
 WORKFLOW_PHASES: list[tuple[str, str]] = [
@@ -33,12 +57,12 @@ IMPLEMENTATION_STEPS: list[tuple[str, str]] = [
     ("transition_in_progress", "Move to In Progress"),
     ("resolve_mapping", "Resolve Bitbucket repo"),
     ("create_branch", "Create branch from Master"),
-    ("repo_context", "Read repository context"),
+    ("repo_stack", "Detect repository stack"),
     ("cursor_development", "Develop with Cursor SDK"),
     ("commit_changes", "Commit changes to branch"),
-    ("create_pr_beta", "Create pull request to Beta"),
+    ("create_pr_beta", "Create pull request to Staging"),
     ("create_pr_master", "Create pull request to Master"),
-    ("verify_beta", "Verify Beta website"),
+    ("verify_beta", "Verify Staging website"),
     ("verify_master", "Verify Master website"),
 ]
 
@@ -47,6 +71,20 @@ STEP_LABELS = dict(IMPLEMENTATION_STEPS)
 
 class PipelineError(Exception):
     pass
+
+
+def _bitbucket_client(session: dict) -> BitbucketClient:
+    if not bitbucket_configured(session):
+        raise PipelineError(
+            "Bitbucket credentials are not configured. Add them in Settings."
+        )
+    return bitbucket_client_from_session(session)
+
+
+def _openai_client(session: dict) -> OpenAIClient:
+    if not openai_configured(session):
+        raise PipelineError("OpenAI API key is not configured. Add it in Settings.")
+    return openai_client_from_session(session)
 
 
 def get_workflow_phase(run: DeliveryRun) -> str:
@@ -62,6 +100,94 @@ def _is_todo_status(status_name: str) -> bool:
 def _is_in_estimation_status(status_name: str) -> bool:
     lowered = status_name.lower().strip()
     return "estimation" in lowered and "complete" not in lowered and "completed" not in lowered
+
+
+def _is_waiting_for_info_status(status_name: str) -> bool:
+    lowered = status_name.lower().strip().replace("-", " ")
+    return "waiting" in lowered and "info" in lowered
+
+
+def _is_jira_ready_for_estimation(status_name: str) -> bool:
+    return not _is_waiting_for_info_status(status_name)
+
+
+def _resume_estimation_phase_if_ready(ctx: dict, snapshot: dict) -> bool:
+    """Move workflow back to estimation when Jira is no longer waiting for info."""
+    if ctx.get("workflow_phase") != "waiting_for_info":
+        return False
+    if ctx.get("estimation_prepared"):
+        return False
+    if not _is_jira_ready_for_estimation(snapshot.get("status_name", "")):
+        return False
+    ctx["workflow_phase"] = "estimation"
+    return True
+
+
+def _should_auto_prepare_in_waiting_for_info(ctx: dict) -> bool:
+    """After a workflow restart, still generate a draft estimation from Jira content."""
+    return bool(str(ctx.get("workflow_notice") or "").strip())
+
+
+async def _auto_prepare_estimation_if_needed(
+    db: AsyncSession,
+    run: DeliveryRun,
+    session: dict,
+    snapshot: dict,
+) -> DeliveryRun:
+    ctx = run.context_data or {}
+    phase = get_workflow_phase(run)
+    if has_pending_post_merge_work(run):
+        return run
+    if phase not in ("estimation", "", "waiting_for_info"):
+        return run
+    if ctx.get("estimation_prepared"):
+        return run
+    if run.status == "running":
+        return run
+    if phase == "waiting_for_info":
+        if not _should_auto_prepare_in_waiting_for_info(ctx):
+            return run
+    elif not _is_jira_ready_for_estimation(snapshot.get("status_name", "")):
+        return run
+    if not openai_configured(session):
+        return run
+    try:
+        return await prepare_estimation(db, run, session)
+    except Exception:
+        await db.refresh(run)
+        return run
+
+
+def _jira_has_original_estimate(snapshot: dict) -> bool:
+    timetracking = snapshot.get("timetracking") or {}
+    original_estimate = str(timetracking.get("originalEstimate") or "").strip()
+    original_seconds = timetracking.get("originalEstimateSeconds")
+    if original_estimate:
+        return True
+    try:
+        return bool(original_seconds and int(original_seconds) > 0)
+    except (TypeError, ValueError):
+        return False
+
+
+def _estimation_was_posted(run: DeliveryRun) -> bool:
+    phase = get_workflow_phase(run)
+    if phase in ("ready_for_implementation", "implementation", "pr_review", "completed"):
+        return True
+    return _step_completed(run, "post_estimation")
+
+
+def _should_restart_for_waiting_for_info(run: DeliveryRun, snapshot: dict) -> bool:
+    """Restart when Jira moved back to waiting-for-info after estimation was posted."""
+    if run.status == "running":
+        return False
+    if not _is_waiting_for_info_status(snapshot.get("status_name", "")):
+        return False
+    if not _estimation_was_posted(run):
+        return False
+    if get_workflow_phase(run) == "waiting_for_info":
+        return False
+    return True
 
 
 _IN_ESTIMATION_EXACT_NAMES: tuple[str, ...] = ("In Estimation",)
@@ -81,6 +207,90 @@ _ESTIMATION_COMPLETE_KEYWORD_SETS: tuple[tuple[str, ...], ...] = (
     ("estimation", "completed"),
     ("complete", "estimation"),
 )
+
+_IN_TESTING_EXACT_NAMES: tuple[str, ...] = ("In Testing", "Unit Testing")
+_IN_TESTING_KEYWORD_SETS: tuple[tuple[str, ...], ...] = (
+    ("in", "testing"),
+    ("testing",),
+)
+
+
+def is_unified_deploy_target(mapping: dict | ProjectRepoMapping) -> bool:
+    """True when staging and live share the same target branch (single PR merge flow)."""
+    if isinstance(mapping, ProjectRepoMapping):
+        beta = mapping.beta_branch.strip().lower()
+        master = mapping.master_branch.strip().lower()
+    else:
+        beta = str(mapping.get("beta_branch", "")).strip().lower()
+        master = str(mapping.get("master_branch", "")).strip().lower()
+    return bool(beta) and beta == master
+
+
+async def _load_fresh_mapping(db: AsyncSession, project_key: str) -> ProjectRepoMapping:
+    """Load mapping from the database, bypassing any stale session cache."""
+    result = await db.execute(
+        select(ProjectRepoMapping)
+        .where(ProjectRepoMapping.jira_project_key == project_key)
+        .execution_options(populate_existing=True)
+    )
+    mapping = result.scalar_one_or_none()
+    if not mapping:
+        raise PipelineError(
+            f"No Bitbucket mapping for project {project_key}. Add one in Admin → Mappings."
+        )
+    await db.refresh(
+        mapping,
+        attribute_names=[
+            "beta_post_pr_merge_command",
+            "master_post_pr_merge_command",
+            "project_root_directory",
+            "ssh_use_sudo",
+            "ssh_host",
+            "ssh_port",
+            "ssh_username",
+            "ssh_auth_type",
+            "ssh_password_encrypted",
+            "ssh_private_key_encrypted",
+            "bitbucket_workspace",
+            "bitbucket_repo_slug",
+        ],
+    )
+    return mapping
+
+
+def _prune_deploy_step_logs(run: DeliveryRun, deploy_step: str) -> None:
+    """Remove prior deploy step log entries so retries reflect the latest command list."""
+    cmd_prefix = f"{deploy_step}_cmd_"
+    run.steps_log = [
+        entry
+        for entry in (run.steps_log or [])
+        if isinstance(entry, dict)
+        and entry.get("step") != deploy_step
+        and not str(entry.get("step", "")).startswith(cmd_prefix)
+    ]
+    flag_modified(run, "steps_log")
+
+
+def _is_in_testing_status(status_name: str) -> bool:
+    lowered = status_name.lower().strip().replace("-", " ")
+    return "testing" in lowered and "complete" not in lowered and "completed" not in lowered
+
+
+async def ensure_in_testing_status(
+    jira: JiraClient,
+    issue_key: str,
+    current_status: str | None = None,
+) -> str:
+    """Move issue to In Testing / Unit Testing after deployment completes successfully."""
+    if current_status and _is_in_testing_status(current_status):
+        return current_status
+    return await _transition_issue(
+        jira,
+        issue_key,
+        keyword_sets=_IN_TESTING_KEYWORD_SETS,
+        exact_names=_IN_TESTING_EXACT_NAMES,
+        label="In Testing",
+    )
 
 
 async def ensure_in_estimation_status(
@@ -117,17 +327,115 @@ async def ensure_estimation_complete_status(
 
 def _build_draft_comment(estimate: dict, issue_key: str, summary: str) -> str:
     jira_comment = str(estimate.get("jira_comment") or "").strip()
-    if jira_comment:
-        return jira_comment
+    development_plan = str(estimate.get("development_plan") or "").strip()
+    test_cases = str(estimate.get("test_cases") or "").strip()
+    reasoning = str(estimate.get("reasoning") or "").strip()
     hours = estimate.get("hours", "n/a")
     story_points = estimate.get("story_points", "n/a")
-    reasoning = estimate.get("reasoning", "")
+
+    if development_plan or test_cases:
+        parts = [
+            f"Estimation for {issue_key}: {summary}",
+            "",
+            f"Story points: {story_points}",
+            f"Original estimate: {hours} hours",
+        ]
+        if reasoning:
+            parts.extend(["", "Reasoning:", reasoning])
+        if development_plan:
+            parts.extend(["", "Development Plan:", development_plan])
+        if test_cases:
+            parts.extend(["", "Test Cases:", test_cases])
+        return "\n".join(parts).strip()
+
+    if jira_comment:
+        return jira_comment
+
     return (
         f"Estimation for {issue_key}: {summary}\n\n"
         f"Story points: {story_points}\n"
         f"Original estimate: {hours} hours\n\n"
         f"Reasoning:\n{reasoning}"
     )
+
+
+def _ticket_context_for_ai(ctx: dict) -> str:
+    return JiraClient.build_ticket_context(
+        ctx.get("description", ""),
+        ctx.get("jira_comments") or [],
+    )
+
+
+async def _fetch_issue_snapshot(jira: JiraClient, issue_key: str) -> dict:
+    issue = await jira.get_issue(issue_key)
+    raw_comments = await jira.get_issue_comments(issue_key)
+    fields = issue.get("fields", {})
+    project = fields.get("project") or {}
+    timetracking = fields.get("timetracking") or {}
+    snapshot = {
+        "issue_id": str(issue.get("id", "")),
+        "project_key": project.get("key", issue_key.split("-")[0]),
+        "summary": fields.get("summary") or issue_key,
+        "description": JiraClient.extract_description(issue),
+        "status_name": (fields.get("status") or {}).get("name", ""),
+        "jira_comments": JiraClient.normalize_comments(raw_comments),
+        "timetracking": timetracking,
+    }
+    snapshot["has_original_estimate"] = _jira_has_original_estimate(snapshot)
+    return snapshot
+
+
+def _apply_issue_snapshot_to_run(run: DeliveryRun, snapshot: dict) -> dict:
+    ctx = dict(run.context_data or {})
+    run.summary = snapshot["summary"]
+    ctx["summary"] = snapshot["summary"]
+    ctx["description"] = snapshot["description"]
+    ctx["status_name"] = snapshot["status_name"]
+    ctx["jira_comments"] = snapshot["jira_comments"]
+    ctx["jira_synced_at"] = datetime.now(timezone.utc).isoformat()
+    run.context_data = ctx
+    return ctx
+
+
+async def reload_jira_issue(
+    db: AsyncSession,
+    run: DeliveryRun,
+    session: dict,
+) -> DeliveryRun:
+    return await sync_jira_workflow_state(db, run, session, raise_on_fetch_error=True)
+
+
+async def sync_jira_workflow_state(
+    db: AsyncSession,
+    run: DeliveryRun,
+    session: dict,
+    *,
+    raise_on_fetch_error: bool = False,
+) -> DeliveryRun:
+    run = await _pause_for_deploy_retry_if_needed(db, run)
+    if run.status == "running":
+        return run
+
+    jira = jira_client_from_session(session)
+    try:
+        snapshot = await _fetch_issue_snapshot(jira, run.jira_issue_key)
+    except Exception as exc:
+        if raise_on_fetch_error:
+            raise PipelineError(f"Could not reload Jira ticket: {exc}") from exc
+        return run
+
+    if _should_restart_for_waiting_for_info(run, snapshot):
+        return await restart_after_waiting_for_info_in_jira(db, run, session, snapshot)
+
+    ctx = _apply_issue_snapshot_to_run(run, snapshot)
+    _resume_estimation_phase_if_ready(ctx, snapshot)
+    run.context_data = ctx
+
+    await db.commit()
+    await db.refresh(run)
+    run = await resume_post_merge_workflow_if_needed(db, run, session)
+    run = await resume_open_pr_review_if_needed(db, run, session)
+    return await _auto_prepare_estimation_if_needed(db, run, session, snapshot)
 
 
 def resolve_draft_comment(run: DeliveryRun, ctx: dict | None = None) -> str | None:
@@ -147,6 +455,8 @@ def resolve_draft_comment(run: DeliveryRun, ctx: dict | None = None) -> str | No
             "hours": run.estimation_hours if run.estimation_hours is not None else estimate.get("hours"),
             "story_points": estimate.get("story_points"),
             "reasoning": run.estimation_summary or estimate.get("reasoning", ""),
+            "development_plan": estimate.get("development_plan", ""),
+            "test_cases": estimate.get("test_cases", ""),
         },
         run.jira_issue_key,
         data.get("summary") or run.summary,
@@ -160,6 +470,220 @@ def _step_completed(run: DeliveryRun, step: str) -> bool:
     return False
 
 
+def _latest_step_status(run: DeliveryRun, step: str) -> str | None:
+    for entry in reversed(run.steps_log or []):
+        if isinstance(entry, dict) and entry.get("step") == step:
+            return entry.get("status")
+    return None
+
+
+def _hydrate_merge_flags_from_steps(run: DeliveryRun, ctx: dict) -> None:
+    if _step_completed(run, "merge_beta_pr"):
+        ctx["beta_merged"] = True
+    if _step_completed(run, "merge_master_pr"):
+        ctx["master_merged"] = True
+
+
+def _has_merge_progress(run: DeliveryRun, ctx: dict | None = None) -> bool:
+    data = ctx if ctx is not None else (run.context_data or {})
+    return bool(
+        data.get("beta_merged")
+        or data.get("master_merged")
+        or _step_completed(run, "merge_beta_pr")
+        or _step_completed(run, "merge_master_pr")
+    )
+
+
+def _deploy_required_for_target(
+    mapping: ProjectRepoMapping | dict,
+    target: Literal["beta", "master"],
+    ctx: dict,
+) -> bool:
+    if target == "beta":
+        if not ctx.get("beta_merged"):
+            return False
+    elif not ctx.get("master_merged") and not (
+        is_unified_deploy_target(mapping) and ctx.get("beta_merged")
+    ):
+        return False
+    if deploy_configured(mapping, target):
+        return True
+    return bool(deploy_commands_for_environment(mapping, target).strip())
+
+
+def _deploy_step_succeeded(run: DeliveryRun, deploy_step: str) -> bool:
+    return _latest_step_status(run, deploy_step) == "completed"
+
+
+def _all_required_deployments_succeeded(
+    run: DeliveryRun,
+    ctx: dict,
+    mapping: ProjectRepoMapping | dict,
+) -> bool:
+    for target, deploy_step in (("beta", "deploy_beta"), ("master", "deploy_master")):
+        if not _deploy_required_for_target(mapping, target, ctx):
+            continue
+        if not _deploy_step_succeeded(run, deploy_step):
+            return False
+    return True
+
+
+def _infer_pending_deploy_target(
+    run: DeliveryRun,
+    ctx: dict,
+    mapping: ProjectRepoMapping | dict,
+) -> str | None:
+    pending = ctx.get("pending_deploy_retry")
+    if pending in ("beta", "master"):
+        return pending
+    for deploy_step, target in (("deploy_beta", "beta"), ("deploy_master", "master")):
+        if _latest_step_status(run, deploy_step) == "failed":
+            return target
+    for target, deploy_step in (("beta", "deploy_beta"), ("master", "deploy_master")):
+        if not _deploy_required_for_target(mapping, target, ctx):
+            continue
+        if not _deploy_step_succeeded(run, deploy_step):
+            return target
+    return None
+
+
+_INTERRUPTED_DEPLOY_MESSAGE = (
+    "Deployment did not finish. Click Retry deployment to run deployment commands again."
+)
+
+
+def _mark_deploy_step_failed(run: DeliveryRun, deploy_step: str, message: str) -> bool:
+    steps = list(run.steps_log or [])
+    changed = False
+    for index in range(len(steps) - 1, -1, -1):
+        entry = steps[index]
+        if (
+            isinstance(entry, dict)
+            and entry.get("step") == deploy_step
+            and entry.get("status") == "running"
+        ):
+            steps[index] = {
+                **entry,
+                "status": "failed",
+                "message": message,
+                "at": datetime.now(timezone.utc).isoformat(),
+            }
+            changed = True
+            break
+    if changed:
+        run.steps_log = steps
+        flag_modified(run, "steps_log")
+    return changed
+
+
+def _reconcile_interrupted_deployment_state(run: DeliveryRun, ctx: dict) -> bool:
+    """Mark interrupted deployments as failed; never auto-runs deploy commands."""
+    _hydrate_merge_flags_from_steps(run, ctx)
+    if not _has_merge_progress(run, ctx):
+        return False
+
+    pending = ctx.get("pending_deploy_retry")
+    if pending not in ("beta", "master"):
+        for deploy_step, target in (("deploy_beta", "beta"), ("deploy_master", "master")):
+            if _latest_step_status(run, deploy_step) == "failed":
+                pending = target
+                break
+    if pending not in ("beta", "master"):
+        return False
+
+    deploy_step = "deploy_beta" if pending == "beta" else "deploy_master"
+    deploy_status = _latest_step_status(run, deploy_step)
+    if deploy_status not in ("running", "failed"):
+        ctx["pending_deploy_retry"] = pending
+        ctx["workflow_phase"] = "pr_review"
+        return run.status == "running"
+
+    changed = False
+    if deploy_status == "running":
+        changed = _mark_deploy_step_failed(run, deploy_step, _INTERRUPTED_DEPLOY_MESSAGE)
+
+    history = list(ctx.get("deployment_history") or [])
+    for index in range(len(history) - 1, -1, -1):
+        entry = history[index]
+        if entry.get("environment") == pending and entry.get("status") == "running":
+            history[index] = {
+                **entry,
+                "status": "failed",
+                "error": entry.get("error") or _INTERRUPTED_DEPLOY_MESSAGE,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            changed = True
+            break
+    if changed:
+        ctx["deployment_history"] = history
+
+    ctx["pending_deploy_retry"] = pending
+    ctx["workflow_phase"] = "pr_review"
+    return changed or run.status == "running"
+
+
+async def _pause_for_deploy_retry_if_needed(
+    db: AsyncSession,
+    run: DeliveryRun,
+) -> DeliveryRun:
+    """Ensure failed/interrupted deployments wait for an explicit user retry."""
+    ctx = dict(run.context_data or {})
+    if not _reconcile_interrupted_deployment_state(run, ctx):
+        return run
+
+    run.context_data = ctx
+    run.status = "awaiting_approval"
+    if not run.error_message:
+        deploy_step = "deploy_beta" if ctx.get("pending_deploy_retry") == "beta" else "deploy_master"
+        for entry in reversed(run.steps_log or []):
+            if isinstance(entry, dict) and entry.get("step") == deploy_step and entry.get("status") == "failed":
+                run.error_message = str(entry.get("message") or _INTERRUPTED_DEPLOY_MESSAGE)
+                break
+        else:
+            run.error_message = _INTERRUPTED_DEPLOY_MESSAGE
+    await db.commit()
+    await db.refresh(run)
+    return run
+
+
+def has_pending_post_merge_work(run: DeliveryRun) -> bool:
+    """True when PR merge started but delivery (deploy/verify/finish) is not complete."""
+    ctx = dict(run.context_data or {})
+    _hydrate_merge_flags_from_steps(run, ctx)
+    if not _has_merge_progress(run, ctx):
+        return False
+    return not (run.status == "completed" and get_workflow_phase(run) == "completed")
+
+
+def _hydrate_ctx_from_steps(run: DeliveryRun, ctx: dict) -> None:
+    """Restore step outputs from steps_log when resuming a failed run."""
+    for entry in run.steps_log or []:
+        if not isinstance(entry, dict) or entry.get("status") != "completed":
+            continue
+        data = entry.get("data")
+        if isinstance(data, dict):
+            ctx.update(data)
+
+
+async def _persist_context(db: AsyncSession, run: DeliveryRun, ctx: dict) -> None:
+    run.context_data = ctx
+    await db.commit()
+
+
+async def _complete_step(
+    db: AsyncSession,
+    run: DeliveryRun,
+    ctx: dict,
+    step: str,
+    message: str,
+    data: dict | None = None,
+) -> None:
+    if data:
+        ctx.update(data)
+    run.context_data = ctx
+    await _log_step(db, run, step, "completed", message, data=data or None)
+
+
 REVISION_STEPS: list[tuple[str, str]] = [
     ("revision_prepare", "Prepare revision context"),
     ("revision_generate", "Generate code changes"),
@@ -169,7 +693,7 @@ REVISION_STEPS: list[tuple[str, str]] = [
 ]
 
 REDEVELOPMENT_RESET_STEPS = frozenset({
-    "repo_context",
+    "repo_stack",
     "cursor_development",
     "generate_code",
     "commit_changes",
@@ -202,6 +726,7 @@ def reset_for_redevelopment(run: DeliveryRun, ctx: dict, *, notice: str = "") ->
         "workflow_phase": "ready_for_implementation",
         "summary": ctx.get("summary") or run.summary,
         "description": ctx.get("description", ""),
+        "jira_comments": ctx.get("jira_comments", []),
         "status_name": ctx.get("status_name"),
         "mapping": ctx.get("mapping"),
         "estimation_prepared": ctx.get("estimation_prepared", True),
@@ -244,8 +769,8 @@ async def reset_after_pr_closed(
     await _log_step(db, run, step_name, "running", "Resetting development on the same branch…")
     await db.commit()
 
-    if attempt_decline and settings.bitbucket_configured and mapping:
-        bitbucket = BitbucketClient(settings.bitbucket_username, settings.bitbucket_app_password)
+    if attempt_decline and bitbucket_configured(session) and mapping:
+        bitbucket = _bitbucket_client(session)
         declined, already_closed = await _decline_tracked_prs(
             bitbucket, mapping, run, ctx, message
         )
@@ -388,7 +913,7 @@ async def prepare_estimation(
     run: DeliveryRun,
     session: dict,
 ) -> DeliveryRun:
-    if get_workflow_phase(run) not in ("estimation", ""):
+    if get_workflow_phase(run) not in ("estimation", "", "waiting_for_info"):
         return run
 
     ctx = dict(run.context_data or {})
@@ -400,8 +925,8 @@ async def prepare_estimation(
             await db.refresh(run)
         return run
 
-    if not settings.openai_configured:
-        raise PipelineError("OPENAI_API_KEY is not configured")
+    if not openai_configured(session):
+        raise PipelineError("OpenAI API key is not configured. Add it in Settings.")
 
     jira = jira_client_from_session(session)
     run.status = "running"
@@ -410,18 +935,21 @@ async def prepare_estimation(
 
     try:
         await _log_step(db, run, "fetch_issue", "running", "Loading ticket details...")
-        issue = await jira.get_issue(run.jira_issue_key)
-        fields = issue.get("fields", {})
-        summary = fields.get("summary") or run.summary
-        description = JiraClient.extract_description(issue)
-        status_name = (fields.get("status") or {}).get("name", "")
+        snapshot = await _fetch_issue_snapshot(jira, run.jira_issue_key)
+        summary = snapshot["summary"]
+        description = snapshot["description"]
+        status_name = snapshot["status_name"]
         run.summary = summary
         ctx["summary"] = summary
         ctx["description"] = description
         ctx["status_name"] = status_name
+        ctx["jira_comments"] = snapshot["jira_comments"]
+        ctx["jira_synced_at"] = datetime.now(timezone.utc).isoformat()
         await db.commit()
 
-        if not _is_in_estimation_status(status_name):
+        waiting_in_jira = _is_waiting_for_info_status(status_name)
+
+        if not waiting_in_jira and not _is_in_estimation_status(status_name):
             new_status = await ensure_in_estimation_status(
                 jira,
                 run.jira_issue_key,
@@ -437,11 +965,12 @@ async def prepare_estimation(
             )
 
         await _log_step(db, run, "estimate", "running", "Preparing AI estimation...")
-        openai = OpenAIClient()
+        openai = _openai_client(session)
         estimate = await openai.estimate_issue(
             run.jira_issue_key,
             summary,
             description,
+            jira_comments=JiraClient.format_comments_for_ai(snapshot["jira_comments"]),
         )
         run.estimation_hours = estimate["hours"]
         run.estimation_summary = estimate["reasoning"]
@@ -449,7 +978,7 @@ async def prepare_estimation(
         ctx["draft_comment"] = _build_draft_comment(estimate, run.jira_issue_key, summary)
         ctx["draft_question"] = estimate.get("clarification_question", "")
         ctx["needs_clarification"] = estimate.get("needs_clarification", False)
-        ctx["workflow_phase"] = "estimation"
+        ctx["workflow_phase"] = "waiting_for_info" if waiting_in_jira else "estimation"
         ctx["estimation_prepared"] = True
         ctx.pop("workflow_notice", None)
         run.context_data = ctx
@@ -602,16 +1131,16 @@ async def request_info(
         raise
 
 
-async def _step_write_impact_analysis(db, run, jira, ctx) -> tuple[str, dict]:
-    if not settings.openai_configured:
-        raise PipelineError("OPENAI_API_KEY is not configured")
+async def _step_write_impact_analysis(db, run, jira, ctx, session) -> tuple[str, dict]:
+    if not openai_configured(session):
+        raise PipelineError("OpenAI API key is not configured. Add it in Settings.")
 
     estimate = ctx.get("estimate") or {}
-    openai = OpenAIClient()
+    openai = _openai_client(session)
     analysis = await openai.generate_impact_analysis(
         run.jira_issue_key,
         ctx.get("summary", run.summary),
-        ctx.get("description", ""),
+        _ticket_context_for_ai(ctx),
         run.estimation_hours,
         run.estimation_summary or estimate.get("reasoning", ""),
     )
@@ -643,6 +1172,10 @@ async def start_implementation(
     run: DeliveryRun,
     session: dict,
 ) -> DeliveryRun:
+    run = await resume_open_pr_review_if_needed(db, run, session)
+    if get_workflow_phase(run) == "pr_review":
+        return run
+
     phase = get_workflow_phase(run)
     resuming = phase == "implementation" and run.status == "failed"
     if phase not in ("ready_for_implementation", "waiting_for_info") and not resuming:
@@ -650,17 +1183,39 @@ async def start_implementation(
 
     jira = jira_client_from_session(session)
     ctx = dict(run.context_data or {})
+    if resuming:
+        _hydrate_ctx_from_steps(run, ctx)
     run.status = "running"
     run.error_message = None
     ctx["workflow_phase"] = "implementation"
     run.context_data = ctx
     await db.commit()
 
+    mapping = await _resolve_run_mapping(db, run, ctx)
+    if mapping and not ctx.get("mapping"):
+        ctx["mapping"] = mapping
+        run.context_data = ctx
+        await db.commit()
+    if mapping and bitbucket_configured(session):
+        bitbucket = _bitbucket_client(session)
+        if await _forget_inactive_tracked_prs(bitbucket, mapping, run, ctx):
+            run.context_data = ctx
+            await db.commit()
+
     try:
+        snapshot = await _fetch_issue_snapshot(jira, run.jira_issue_key)
+        ctx["summary"] = snapshot["summary"]
+        ctx["description"] = snapshot["description"]
+        ctx["status_name"] = snapshot["status_name"]
+        ctx["jira_comments"] = snapshot["jira_comments"]
+        ctx["jira_synced_at"] = datetime.now(timezone.utc).isoformat()
+        run.summary = snapshot["summary"]
+        run.context_data = ctx
+        await db.commit()
+
         if not _step_completed(run, "impact_analysis"):
-            result = await _step_write_impact_analysis(db, run, jira, ctx)
-            await _log_step(db, run, "impact_analysis", "completed", result[0], data=result[1] or None)
-            ctx.update(result[1] or {})
+            result = await _step_write_impact_analysis(db, run, jira, ctx, session)
+            await _complete_step(db, run, ctx, "impact_analysis", result[0], result[1] or None)
 
         if not _step_completed(run, "transition_in_progress"):
             new_status = await _transition_issue(
@@ -671,53 +1226,46 @@ async def start_implementation(
                 label="In Progress",
             )
             ctx["status_name"] = new_status
+            await _persist_context(db, run, ctx)
             await _log_step(db, run, "transition_in_progress", "completed", f"Status: {new_status}")
 
         if not _step_completed(run, "resolve_mapping"):
             result = await _step_resolve_mapping(db, run, jira, ctx)
-            await _log_step(db, run, "resolve_mapping", "completed", result[0], data=result[1] or None)
-            ctx.update(result[1] or {})
+            await _complete_step(db, run, ctx, "resolve_mapping", result[0], result[1] or None)
 
         if not _step_completed(run, "create_branch"):
-            result = await _step_create_branch(db, run, jira, ctx)
-            await _log_step(db, run, "create_branch", "completed", result[0], data=result[1] or None)
-            ctx.update(result[1] or {})
+            result = await _step_create_branch(db, run, jira, ctx, session)
+            await _complete_step(db, run, ctx, "create_branch", result[0], result[1] or None)
 
-        if not _step_completed(run, "repo_context"):
-            result = await _step_repo_context(db, run, jira, ctx)
-            await _log_step(db, run, "repo_context", "completed", result[0], data=result[1] or None)
-            ctx.update(result[1] or {})
+        if bitbucket_configured(session) and not _step_completed(run, "repo_stack"):
+            result = await _step_repo_stack(db, run, jira, ctx, session)
+            await _complete_step(db, run, ctx, "repo_stack", result[0], result[1] or None)
 
         if not _step_completed(run, "cursor_development"):
-            result = await _step_cursor_development(db, run, jira, ctx)
-            await _log_step(db, run, "cursor_development", "completed", result[0], data=result[1] or None)
-            ctx.update(result[1] or {})
+            result = await _step_cursor_development(db, run, jira, ctx, session)
+            await _complete_step(db, run, ctx, "cursor_development", result[0], result[1] or None)
 
         if (ctx.get("development_result") or {}).get("source") != "cursor_sdk":
             if not _step_completed(run, "generate_code"):
-                result = await _step_generate_code(db, run, jira, ctx)
-                await _log_step(db, run, "generate_code", "completed", result[0], data=result[1] or None)
-                ctx.update(result[1] or {})
+                result = await _step_generate_code(db, run, jira, ctx, session)
+                await _complete_step(db, run, ctx, "generate_code", result[0], result[1] or None)
 
             if not _step_completed(run, "commit_changes"):
-                result = await _step_commit_changes(db, run, jira, ctx)
-                await _log_step(db, run, "commit_changes", "completed", result[0], data=result[1] or None)
-                ctx.update(result[1] or {})
+                result = await _step_commit_changes(db, run, jira, ctx, session)
+                await _complete_step(db, run, ctx, "commit_changes", result[0], result[1] or None)
 
         if not _step_completed(run, "create_pr_beta"):
-            result = await _step_create_pr_beta(db, run, jira, ctx)
-            await _log_step(db, run, "create_pr_beta", "completed", result[0], data=result[1] or None)
-            ctx.update(result[1] or {})
+            result = await _step_create_pr_beta(db, run, jira, ctx, session)
+            await _complete_step(db, run, ctx, "create_pr_beta", result[0], result[1] or None)
 
         if not _step_completed(run, "create_pr_master"):
-            result = await _step_create_pr_master(db, run, jira, ctx)
-            await _log_step(db, run, "create_pr_master", "completed", result[0], data=result[1] or None)
-            ctx.update(result[1] or {})
+            result = await _step_create_pr_master(db, run, jira, ctx, session)
+            await _complete_step(db, run, ctx, "create_pr_master", result[0], result[1] or None)
 
         mapping = ctx.get("mapping") or {}
         branch_name = run.branch_name or ctx.get("branch_name")
         if branch_name and mapping:
-            bitbucket = BitbucketClient(settings.bitbucket_username, settings.bitbucket_app_password)
+            bitbucket = _bitbucket_client(session)
             changed = await bitbucket.list_changed_files(
                 mapping["workspace"],
                 mapping["repo_slug"],
@@ -788,6 +1336,239 @@ def _pr_ids_for_run(run: DeliveryRun, ctx: dict) -> tuple[int | None, int | None
     )
 
 
+def _clear_beta_pr_refs(ctx: dict, run: DeliveryRun) -> None:
+    for key in ("beta_pr_id", "beta_pr_url", "pr_id", "pr_url"):
+        ctx.pop(key, None)
+    run.pr_id = None
+    run.pr_url = None
+
+
+def _clear_master_pr_refs(ctx: dict) -> None:
+    ctx.pop("master_pr_id", None)
+    ctx.pop("master_pr_url", None)
+
+
+async def _load_open_pr(
+    bitbucket: BitbucketClient,
+    mapping: dict,
+    pr_id: int | None,
+) -> dict | None:
+    if not pr_id:
+        return None
+    pr = await bitbucket.get_pull_request_safe(
+        mapping["workspace"],
+        mapping["repo_slug"],
+        int(pr_id),
+    )
+    if pr and BitbucketClient.is_pull_request_open(pr):
+        return pr
+    return None
+
+
+async def _discover_open_prs_for_branch(
+    bitbucket: BitbucketClient,
+    mapping: dict,
+    branch_name: str,
+    *,
+    beta_pr: dict | None = None,
+    master_pr: dict | None = None,
+    beta_merged: bool = False,
+    master_merged: bool = False,
+) -> tuple[dict | None, dict | None]:
+    """Find open staging/live PRs for a feature branch."""
+    found_beta = beta_pr
+    found_master = master_pr
+    try:
+        open_prs = await bitbucket.list_open_pull_requests_for_branch(
+            mapping["workspace"],
+            mapping["repo_slug"],
+            branch_name,
+        )
+    except Exception:
+        return found_beta, found_master
+
+    for pr in open_prs:
+        dest = ((pr.get("destination") or {}).get("branch") or {}).get("name", "")
+        if not found_beta and not beta_merged and dest == mapping["beta_branch"]:
+            found_beta = pr
+        elif (
+            not found_master
+            and not master_merged
+            and not is_unified_deploy_target(mapping)
+            and dest == mapping["master_branch"]
+        ):
+            found_master = pr
+    return found_beta, found_master
+
+
+def _apply_open_pr_refs(
+    run: DeliveryRun,
+    ctx: dict,
+    *,
+    beta_pr: dict | None,
+    master_pr: dict | None,
+) -> None:
+    if beta_pr:
+        beta_pr_id = beta_pr.get("id")
+        beta_pr_url = BitbucketClient.pr_html_url(beta_pr)
+        if beta_pr_id:
+            ctx["beta_pr_id"] = int(beta_pr_id)
+            ctx["beta_pr_url"] = beta_pr_url
+            ctx["pr_id"] = int(beta_pr_id)
+            ctx["pr_url"] = beta_pr_url
+            run.pr_id = int(beta_pr_id)
+            run.pr_url = beta_pr_url
+    if master_pr:
+        master_pr_id = master_pr.get("id")
+        master_pr_url = BitbucketClient.pr_html_url(master_pr)
+        if master_pr_id:
+            ctx["master_pr_id"] = int(master_pr_id)
+            ctx["master_pr_url"] = master_pr_url
+
+
+async def resume_post_merge_workflow_if_needed(
+    db: AsyncSession,
+    run: DeliveryRun,
+    session: dict,
+) -> DeliveryRun:
+    """Restore PR-review UI after merge when delivery is unfinished; deploy only on explicit retry."""
+    run = await _pause_for_deploy_retry_if_needed(db, run)
+    if run.status == "running":
+        return run
+    if run.status == "completed" and get_workflow_phase(run) == "completed":
+        return run
+
+    ctx = dict(run.context_data or {})
+    _hydrate_merge_flags_from_steps(run, ctx)
+    if not _has_merge_progress(run, ctx):
+        return run
+
+    mapping = await _resolve_run_mapping(db, run, ctx)
+    ctx["workflow_phase"] = "pr_review"
+    ctx["estimation_prepared"] = True
+    try:
+        mapping_row = await _load_fresh_mapping(db, run.project_key)
+    except PipelineError:
+        mapping_row = None
+    if mapping_row:
+        pending = _infer_pending_deploy_target(run, ctx, mapping_row)
+        if pending:
+            ctx["pending_deploy_retry"] = pending
+
+    run.context_data = ctx
+    if run.status in ("failed", "active"):
+        run.status = "awaiting_approval"
+    run.error_message = None
+    await db.commit()
+    await db.refresh(run)
+
+    if mapping and bitbucket_configured(session):
+        try:
+            bitbucket = _bitbucket_client(session)
+            run = await _sync_pr_changed_files(db, run, dict(run.context_data or {}), mapping, bitbucket)
+            await db.refresh(run)
+        except Exception:
+            pass
+    return run
+
+
+async def resume_open_pr_review_if_needed(
+    db: AsyncSession,
+    run: DeliveryRun,
+    session: dict,
+) -> DeliveryRun:
+    """When open PRs already exist, skip earlier workflow phases and show PR review."""
+    phase = get_workflow_phase(run)
+    if phase in ("pr_review", "completed"):
+        return run
+    if run.status == "running":
+        return run
+
+    ctx = dict(run.context_data or {})
+    mapping = await _resolve_run_mapping(db, run, ctx)
+    if not mapping or not bitbucket_configured(session):
+        return run
+
+    bitbucket = _bitbucket_client(session)
+    branch_name = run.branch_name or ctx.get("branch_name")
+
+    beta_pr = await _load_open_pr(
+        bitbucket,
+        mapping,
+        ctx.get("beta_pr_id") or run.pr_id,
+    ) if not ctx.get("beta_merged") else None
+    master_pr = await _load_open_pr(
+        bitbucket,
+        mapping,
+        ctx.get("master_pr_id"),
+    ) if not ctx.get("master_merged") else None
+
+    if not branch_name:
+        for pr in (beta_pr, master_pr):
+            if pr:
+                branch_name = ((pr.get("source") or {}).get("branch") or {}).get("name")
+                if branch_name:
+                    break
+
+    if branch_name and (not beta_pr or (not master_pr and not is_unified_deploy_target(mapping))):
+        beta_pr, master_pr = await _discover_open_prs_for_branch(
+            bitbucket,
+            mapping,
+            branch_name,
+            beta_pr=beta_pr,
+            master_pr=master_pr,
+            beta_merged=bool(ctx.get("beta_merged")),
+            master_merged=bool(ctx.get("master_merged")),
+        )
+
+    if not beta_pr and not master_pr:
+        return run
+
+    if branch_name:
+        run.branch_name = branch_name
+        ctx["branch_name"] = branch_name
+
+    _apply_open_pr_refs(run, ctx, beta_pr=beta_pr, master_pr=master_pr)
+    ctx["workflow_phase"] = "pr_review"
+    ctx["estimation_prepared"] = True
+    run.status = "awaiting_approval"
+    run.error_message = None
+    run.context_data = ctx
+    await db.commit()
+    await db.refresh(run)
+
+    return await _sync_pr_changed_files(db, run, dict(run.context_data or {}), mapping, bitbucket)
+
+
+async def _forget_inactive_tracked_prs(
+    bitbucket: BitbucketClient,
+    mapping: dict,
+    run: DeliveryRun,
+    ctx: dict,
+) -> bool:
+    """Drop stored PR ids that are no longer open so the same branch can get fresh PRs."""
+    workspace = mapping["workspace"]
+    repo_slug = mapping["repo_slug"]
+    changed = False
+    beta_pr_id, master_pr_id = _pr_ids_for_run(run, ctx)
+
+    if beta_pr_id and not ctx.get("beta_merged"):
+        pr = await bitbucket.get_pull_request_safe(workspace, repo_slug, int(beta_pr_id))
+        if BitbucketClient.is_pull_request_inactive(pr):
+            _clear_beta_pr_refs(ctx, run)
+            _invalidate_steps(run, frozenset({"create_pr_beta"}))
+            changed = True
+
+    if master_pr_id and not ctx.get("master_merged"):
+        pr = await bitbucket.get_pull_request_safe(workspace, repo_slug, int(master_pr_id))
+        if BitbucketClient.is_pull_request_inactive(pr):
+            _clear_master_pr_refs(ctx)
+            _invalidate_steps(run, frozenset({"create_pr_master"}))
+            changed = True
+
+    return changed
+
+
 async def _decline_tracked_prs(
     bitbucket: BitbucketClient,
     mapping: dict,
@@ -803,22 +1584,30 @@ async def _decline_tracked_prs(
     beta_pr_id, master_pr_id = _pr_ids_for_run(run, ctx)
 
     if beta_pr_id and not ctx.get("beta_merged"):
-        outcome = await bitbucket.decline_pull_request_if_open(
-            workspace, repo_slug, int(beta_pr_id), message
-        )
-        if outcome == "declined":
-            declined.append(f"Beta PR #{beta_pr_id}")
-        else:
+        pr = await bitbucket.get_pull_request_safe(workspace, repo_slug, int(beta_pr_id))
+        if BitbucketClient.is_pull_request_inactive(pr):
             already_closed.append(f"Beta PR #{beta_pr_id}")
+        else:
+            outcome = await bitbucket.decline_pull_request_if_open(
+                workspace, repo_slug, int(beta_pr_id), message
+            )
+            if outcome == "declined":
+                declined.append(f"Beta PR #{beta_pr_id}")
+            else:
+                already_closed.append(f"Beta PR #{beta_pr_id}")
 
     if master_pr_id and not ctx.get("master_merged"):
-        outcome = await bitbucket.decline_pull_request_if_open(
-            workspace, repo_slug, int(master_pr_id), message
-        )
-        if outcome == "declined":
-            declined.append(f"Live PR #{master_pr_id}")
-        else:
+        pr = await bitbucket.get_pull_request_safe(workspace, repo_slug, int(master_pr_id))
+        if BitbucketClient.is_pull_request_inactive(pr):
             already_closed.append(f"Live PR #{master_pr_id}")
+        else:
+            outcome = await bitbucket.decline_pull_request_if_open(
+                workspace, repo_slug, int(master_pr_id), message
+            )
+            if outcome == "declined":
+                declined.append(f"Live PR #{master_pr_id}")
+            else:
+                already_closed.append(f"Live PR #{master_pr_id}")
 
     return declined, already_closed
 
@@ -830,6 +1619,163 @@ def _all_prs_merged(run: DeliveryRun, ctx: dict) -> bool:
     return beta_done and master_done
 
 
+def _bitbucket_deploy_credentials(session: dict) -> tuple[str, str] | None:
+    return bitbucket_git_credentials(session)
+
+
+async def _run_environment_deploy_step(
+    db: AsyncSession,
+    run: DeliveryRun,
+    mapping: ProjectRepoMapping,
+    target: Literal["beta", "master"],
+    env_label: str,
+    deploy_step: str,
+    session: dict,
+    *,
+    trigger: str = "merge",
+) -> None:
+    mapping = await _load_fresh_mapping(db, run.project_key)
+    commands = await fetch_deploy_commands_from_db(db, run.project_key, target)
+    _prune_deploy_step_logs(run, deploy_step)
+
+    bitbucket_credentials = _bitbucket_deploy_credentials(session)
+    if commands_need_bitbucket_auth(commands) and not bitbucket_credentials:
+        raise PipelineError(
+            "Deployment includes git commands that require Bitbucket authentication. "
+            "Add your Atlassian account email and Bitbucket API token in Settings."
+        )
+
+    ctx = dict(run.context_data or {})
+    started_at = datetime.now(timezone.utc).isoformat()
+    history_entry: dict = {
+        "id": started_at,
+        "environment": target,
+        "environment_label": env_label,
+        "trigger": trigger,
+        "status": "running",
+        "started_at": started_at,
+        "planned_commands": commands,
+        "commands": [],
+    }
+    history = list(ctx.get("deployment_history") or [])
+    history.append(history_entry)
+    ctx["deployment_history"] = history
+    run.context_data = ctx
+    await db.commit()
+    await db.refresh(run)
+
+    if deploy_configured(mapping, target):
+        await _log_step(db, run, deploy_step, "running", f"Running {env_label} deployment commands…")
+
+        async def on_command_progress(
+            status: str,
+            index: int,
+            total: int,
+            command: str,
+            output: str,
+        ) -> None:
+            step_id = f"{deploy_step}_cmd_{index}"
+            if status == "running":
+                message = f"({index + 1}/{total}) {command}"
+            elif status == "failed":
+                message = output or f"Failed: {command}"
+            else:
+                message = output or f"Completed: {command}"
+            await _log_step(db, run, step_id, status, message)
+
+            cmd_ctx = dict(run.context_data or {})
+            cmd_history = list(cmd_ctx.get("deployment_history") or [])
+            if cmd_history:
+                commands = list(cmd_history[-1].get("commands") or [])
+                cmd_record = {
+                    "index": index,
+                    "command": command,
+                    "status": status,
+                    "output": output,
+                    "at": datetime.now(timezone.utc).isoformat(),
+                }
+                existing = next((item for item in commands if item.get("index") == index), None)
+                if existing:
+                    existing.update(cmd_record)
+                else:
+                    commands.append(cmd_record)
+                cmd_history[-1]["commands"] = commands
+                cmd_ctx["deployment_history"] = cmd_history
+                run.context_data = cmd_ctx
+                await db.commit()
+                await db.refresh(run)
+
+        try:
+            deploy_kwargs: dict = {
+                "commands": commands,
+                "on_command_progress": on_command_progress,
+            }
+            if bitbucket_credentials:
+                deploy_kwargs["bitbucket_username"] = bitbucket_credentials[0]
+                deploy_kwargs["bitbucket_app_password"] = bitbucket_credentials[1]
+            deploy_output = await run_environment_deploy(mapping, target, **deploy_kwargs)
+        except DeployError as exc:
+            fail_ctx = dict(run.context_data or {})
+            fail_history = list(fail_ctx.get("deployment_history") or [])
+            if fail_history:
+                fail_history[-1]["status"] = "failed"
+                fail_history[-1]["error"] = str(exc)
+                fail_history[-1]["completed_at"] = datetime.now(timezone.utc).isoformat()
+            fail_ctx["deployment_history"] = fail_history
+            fail_ctx["pending_deploy_retry"] = target
+            run.context_data = fail_ctx
+            await _log_step(db, run, deploy_step, "failed", str(exc))
+            await db.commit()
+            await db.refresh(run)
+            raise PipelineError(str(exc)) from exc
+
+        success_ctx = dict(run.context_data or {})
+        success_history = list(success_ctx.get("deployment_history") or [])
+        if success_history:
+            success_history[-1]["status"] = "completed"
+            success_history[-1]["output"] = deploy_output
+            success_history[-1]["completed_at"] = datetime.now(timezone.utc).isoformat()
+        success_ctx["deployment_history"] = success_history
+        success_ctx.pop("pending_deploy_retry", None)
+        run.context_data = success_ctx
+        await _log_step(db, run, deploy_step, "completed", deploy_output)
+    elif deploy_commands_for_environment(mapping, target).strip():
+        await _log_step(
+            db,
+            run,
+            deploy_step,
+            "skipped",
+            f"{env_label} deployment commands are configured but SSH credentials are incomplete",
+        )
+
+
+async def _transition_to_in_testing_after_merge(
+    db: AsyncSession,
+    run: DeliveryRun,
+    jira: JiraClient,
+    ctx: dict,
+) -> dict:
+    if _is_in_testing_status(str(ctx.get("status_name") or "")):
+        return ctx
+    try:
+        new_status = await ensure_in_testing_status(
+            jira,
+            run.jira_issue_key,
+            ctx.get("status_name"),
+        )
+        ctx["status_name"] = new_status
+        await _log_step(
+            db,
+            run,
+            "transition_in_testing",
+            "completed",
+            f"Status: {new_status}",
+        )
+    except Exception as exc:
+        await _log_step(db, run, "transition_in_testing", "failed", str(exc))
+    return ctx
+
+
 async def _finalize_completed_run(
     db: AsyncSession,
     run: DeliveryRun,
@@ -837,17 +1783,6 @@ async def _finalize_completed_run(
     ctx: dict,
     merged_summary: list[str],
 ) -> DeliveryRun:
-    try:
-        transitions = await jira.get_transitions(run.jira_issue_key)
-        done = JiraClient.find_transition(transitions, "done") or JiraClient.find_transition(
-            transitions, "complete"
-        )
-        if done:
-            await jira.transition_issue(run.jira_issue_key, done["id"])
-            ctx["status_name"] = done["name"]
-    except Exception:
-        pass
-
     verification_lines = []
     for item in ctx.get("verifications") or []:
         if not isinstance(item, dict):
@@ -863,11 +1798,11 @@ async def _finalize_completed_run(
         await _jira_comment(
             jira,
             run.jira_issue_key,
-            f"[Delivery Manager] Approved & merged\n\n"
+            f"[Delivery Manager] Merged — In Testing\n\n"
             f"Merged: {', '.join(merged_summary)}\n"
             f"Beta PR: {beta_url or 'n/a'}\n"
             f"Master PR: {master_url or 'n/a'}\n\n"
-            f"Website verification:\n{verification_block}",
+            f"Website verification (screenshots attached above):\n{verification_block}",
         )
     except Exception:
         pass
@@ -878,6 +1813,138 @@ async def _finalize_completed_run(
     await db.commit()
     await db.refresh(run)
     return run
+
+
+async def _continue_merge_flow_after_deploy(
+    db: AsyncSession,
+    run: DeliveryRun,
+    jira: JiraClient,
+    ctx: dict,
+    mapping: ProjectRepoMapping,
+    session: dict,
+    target: MergeTarget,
+    beta_pr_id: int | None,
+    master_pr_id: int | None,
+    *,
+    deploy_trigger: str = "merge",
+) -> DeliveryRun:
+    mapping = await _load_fresh_mapping(db, run.project_key)
+    ctx = dict(run.context_data or {})
+    env_label = "Staging" if target == "beta" else "Live"
+    verify_step = "verify_beta" if target == "beta" else "verify_master"
+
+    if not _step_completed(run, verify_step):
+        await _log_step(db, run, verify_step, "running", f"Testing {env_label} website…")
+        result = await _step_verify_website(db, run, jira, ctx, env_label, session)
+        await _log_step(db, run, verify_step, "completed", result[0], data=result[1] or None)
+        ctx.update(result[1] or {})
+
+    if target == "beta" and is_unified_deploy_target(mapping):
+        if not _step_completed(run, "deploy_master"):
+            await _run_environment_deploy_step(
+                db,
+                run,
+                mapping,
+                "master",
+                "Live",
+                "deploy_master",
+                session,
+                trigger=deploy_trigger,
+            )
+        if not _step_completed(run, "verify_master"):
+            await _log_step(db, run, "verify_master", "running", "Testing Live website…")
+            master_result = await _step_verify_website(db, run, jira, ctx, "Live", session)
+            await _log_step(
+                db,
+                run,
+                "verify_master",
+                "completed",
+                master_result[0],
+                data=master_result[1] or None,
+            )
+            ctx.update(master_result[1] or {})
+
+    merged_summary: list[str] = []
+    if ctx.get("beta_merged"):
+        merged_summary.append(f"Staging PR #{beta_pr_id}" if beta_pr_id else "Staging")
+    if ctx.get("master_merged"):
+        merged_summary.append(f"Live PR #{master_pr_id}" if master_pr_id else "Live")
+
+    if _all_prs_merged(run, ctx) and _all_required_deployments_succeeded(run, ctx, mapping):
+        ctx = await _transition_to_in_testing_after_merge(db, run, jira, ctx)
+        return await _finalize_completed_run(db, run, jira, ctx, merged_summary)
+
+    ctx["workflow_phase"] = "pr_review"
+    pending = _infer_pending_deploy_target(run, ctx, mapping)
+    if pending:
+        ctx["pending_deploy_retry"] = pending
+    else:
+        ctx.pop("pending_deploy_retry", None)
+    run.context_data = ctx
+    run.status = "awaiting_approval"
+    run.error_message = None
+    await db.commit()
+    await db.refresh(run)
+    return run
+
+
+async def _handle_post_merge_failure(
+    db: AsyncSession,
+    run: DeliveryRun,
+    ctx: dict,
+    target: MergeTarget,
+    exc: Exception,
+) -> DeliveryRun:
+    ctx = dict(ctx)
+    ctx["workflow_phase"] = "pr_review"
+    if not ctx.get("pending_deploy_retry"):
+        ctx["pending_deploy_retry"] = target
+    deploy_step = "deploy_beta" if target == "beta" else "deploy_master"
+    if _latest_step_status(run, deploy_step) == "running":
+        _mark_deploy_step_failed(run, deploy_step, str(exc))
+    history = list(ctx.get("deployment_history") or [])
+    for index in range(len(history) - 1, -1, -1):
+        entry = history[index]
+        if entry.get("environment") == target and entry.get("status") == "running":
+            history[index] = {
+                **entry,
+                "status": "failed",
+                "error": str(exc),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            ctx["deployment_history"] = history
+            break
+    run.context_data = ctx
+    run.status = "awaiting_approval"
+    run.error_message = str(exc)
+    await db.commit()
+    await db.refresh(run)
+    return run
+
+
+async def _attempt_merge_pull_request(
+    bitbucket: BitbucketClient,
+    workspace: str,
+    repo_slug: str,
+    pr_id: int,
+    merged_label: str,
+) -> str:
+    """Merge a PR or confirm it was already merged. Raises PipelineError on failure."""
+    try:
+        await bitbucket.merge_pull_request(workspace, repo_slug, pr_id)
+        return f"Merged {merged_label}"
+    except Exception as exc:
+        pr = await bitbucket.get_pull_request_safe(workspace, repo_slug, pr_id)
+        if BitbucketClient.is_pull_request_merged(pr):
+            return f"{merged_label} (already merged)"
+        if pr and BitbucketClient.is_pull_request_open(pr):
+            if await bitbucket.pull_request_has_merge_conflicts(workspace, repo_slug, pr_id):
+                raise PipelineError(
+                    f"Cannot merge {merged_label}: the pull request has merge conflicts. "
+                    "Resolve conflicts in Bitbucket, then try merging again."
+                ) from exc
+        detail = BitbucketClient.http_error_detail(exc)
+        raise PipelineError(f"Failed to merge {merged_label}: {detail}") from exc
 
 
 async def merge_pr_target(
@@ -897,71 +1964,143 @@ async def merge_pr_target(
 
     if target == "beta":
         if not beta_pr_id:
-            raise PipelineError("No Beta pull request to merge")
+            raise PipelineError("No Staging pull request to merge")
         if ctx.get("beta_merged"):
-            raise PipelineError("Beta pull request is already merged")
+            raise PipelineError("Staging pull request is already merged")
         pr_id = beta_pr_id
-        env_label = "Beta"
+        env_label = "Staging"
         merged_key = "beta_merged"
         step_name = "merge_beta_pr"
-        verify_step = "verify_beta"
+        deploy_step = "deploy_beta"
     else:
         if not master_pr_id:
             raise PipelineError("No Live (Master) pull request to merge")
         if ctx.get("master_merged"):
             raise PipelineError("Live pull request is already merged")
         pr_id = master_pr_id
-        env_label = "Master"
+        env_label = "Live"
         merged_key = "master_merged"
         step_name = "merge_master_pr"
-        verify_step = "verify_master"
+        deploy_step = "deploy_master"
 
     jira = jira_client_from_session(session)
-    bitbucket = BitbucketClient(settings.bitbucket_username, settings.bitbucket_app_password)
+    bitbucket = _bitbucket_client(session)
     run.status = "running"
     run.error_message = None
     await db.commit()
 
     merged_label = f"{env_label} PR #{pr_id}"
     try:
-        try:
-            await bitbucket.merge_pull_request(
-                mapping.bitbucket_workspace, mapping.bitbucket_repo_slug, pr_id
-            )
-            merge_message = f"Merged {merged_label}"
-        except Exception:
-            merge_message = f"{merged_label} (already merged)"
-
+        await _log_step(db, run, step_name, "running", f"Merging {merged_label}…")
+        merge_message = await _attempt_merge_pull_request(
+            bitbucket,
+            mapping.bitbucket_workspace,
+            mapping.bitbucket_repo_slug,
+            pr_id,
+            merged_label,
+        )
         ctx[merged_key] = True
         await _log_step(db, run, step_name, "completed", merge_message)
 
-        result = await _step_verify_website(db, run, jira, ctx, env_label)
-        await _log_step(db, run, verify_step, "completed", result[0], data=result[1] or None)
-        ctx.update(result[1] or {})
+        await _run_environment_deploy_step(
+            db, run, mapping, target, env_label, deploy_step, session, trigger="merge"
+        )
 
-        merged_summary: list[str] = []
-        if ctx.get("beta_merged"):
-            merged_summary.append(f"Beta PR #{beta_pr_id}" if beta_pr_id else "Beta")
-        if ctx.get("master_merged"):
-            merged_summary.append(f"Master PR #{master_pr_id}" if master_pr_id else "Master")
+        return await _continue_merge_flow_after_deploy(
+            db,
+            run,
+            jira,
+            ctx,
+            mapping,
+            session,
+            target,
+            beta_pr_id,
+            master_pr_id,
+            deploy_trigger="merge",
+        )
 
-        if _all_prs_merged(run, ctx):
-            return await _finalize_completed_run(db, run, jira, ctx, merged_summary)
-
-        ctx["workflow_phase"] = "pr_review"
-        run.context_data = ctx
-        run.status = "awaiting_approval"
-        await db.commit()
-        await db.refresh(run)
-        return run
-
-    except Exception as exc:
+    except PipelineError as exc:
+        ctx = dict(run.context_data or {})
+        if ctx.get(merged_key):
+            return await _handle_post_merge_failure(db, run, ctx, target, exc)
         run.status = "failed"
         run.error_message = str(exc)
         await _log_step(db, run, step_name, "failed", str(exc))
         await db.commit()
         await db.refresh(run)
         raise
+    except Exception as exc:
+        ctx = dict(run.context_data or {})
+        if ctx.get(merged_key):
+            return await _handle_post_merge_failure(db, run, ctx, target, exc)
+        run.status = "failed"
+        run.error_message = str(exc)
+        await _log_step(db, run, step_name, "failed", str(exc))
+        await db.commit()
+        await db.refresh(run)
+        raise
+
+
+async def retry_deployment(
+    db: AsyncSession,
+    run: DeliveryRun,
+    session: dict,
+    mapping: ProjectRepoMapping,
+    target: MergeTarget | None = None,
+) -> DeliveryRun:
+    mapping = await _load_fresh_mapping(db, run.project_key)
+    ctx = dict(run.context_data or {})
+    retry_target = target or ctx.get("pending_deploy_retry")
+    if retry_target not in ("beta", "master"):
+        raise PipelineError("No failed deployment to retry")
+
+    if retry_target == "beta":
+        if not ctx.get("beta_merged"):
+            raise PipelineError("Staging pull request is not merged yet")
+        env_label = "Staging"
+        deploy_step = "deploy_beta"
+    else:
+        if not ctx.get("master_merged"):
+            raise PipelineError("Live pull request is not merged yet")
+        env_label = "Live"
+        deploy_step = "deploy_master"
+
+    if run.status not in ("awaiting_approval", "running", "failed"):
+        raise PipelineError("Run is not ready for deployment retry")
+
+    beta_pr_id, master_pr_id = _pr_ids_for_run(run, ctx)
+    jira = jira_client_from_session(session)
+    run.status = "running"
+    run.error_message = None
+    await db.commit()
+
+    try:
+        await _run_environment_deploy_step(
+            db,
+            run,
+            mapping,
+            retry_target,
+            env_label,
+            deploy_step,
+            session,
+            trigger="retry",
+        )
+        return await _continue_merge_flow_after_deploy(
+            db,
+            run,
+            jira,
+            ctx,
+            mapping,
+            session,
+            retry_target,
+            beta_pr_id,
+            master_pr_id,
+            deploy_trigger="retry",
+        )
+    except PipelineError as exc:
+        return await _handle_post_merge_failure(db, run, dict(run.context_data or {}), retry_target, exc)
+    except Exception as exc:
+        return await _handle_post_merge_failure(db, run, dict(run.context_data or {}), retry_target, exc)
 
 
 async def approve_and_merge(
@@ -994,23 +2133,26 @@ async def _resolve_run_mapping(
     run: DeliveryRun,
     ctx: dict,
 ) -> dict | None:
-    mapping = ctx.get("mapping")
-    if mapping:
-        return mapping
+    mapping = dict(ctx.get("mapping") or {})
     result = await db.execute(
         select(ProjectRepoMapping).where(ProjectRepoMapping.jira_project_key == run.project_key)
     )
     mapping_row = result.scalar_one_or_none()
     if not mapping_row:
-        return None
-    return {
+        return mapping or None
+    db_mapping = {
         "workspace": mapping_row.bitbucket_workspace,
         "repo_slug": mapping_row.bitbucket_repo_slug,
         "master_branch": mapping_row.master_branch,
         "beta_branch": mapping_row.beta_branch,
         "beta_website_url": mapping_row.beta_website_url,
         "master_website_url": mapping_row.master_website_url,
+        "rules": mapping_row.rules or "",
+        "skills": mapping_row.skills or "",
     }
+    if mapping:
+        return {**mapping, **db_mapping}
+    return db_mapping
 
 
 async def _check_pr_review_stale(
@@ -1019,38 +2161,13 @@ async def _check_pr_review_stale(
     mapping: dict,
     bitbucket: BitbucketClient,
 ) -> str | None:
+    """Only treat a missing feature branch as stale; declined/closed PRs are ignored."""
     branch_name = run.branch_name or ctx.get("branch_name")
     if branch_name:
         if not await bitbucket.branch_exists(
             mapping["workspace"], mapping["repo_slug"], branch_name
         ):
             return "Feature branch was removed (pull request likely declined)"
-
-    beta_pr_id, master_pr_id = _pr_ids_for_run(run, ctx)
-    tracked: list[tuple[str, int]] = []
-    if beta_pr_id and not ctx.get("beta_merged"):
-        tracked.append(("Beta", int(beta_pr_id)))
-    if master_pr_id and not ctx.get("master_merged"):
-        tracked.append(("Live", int(master_pr_id)))
-
-    if not tracked:
-        return None
-
-    open_count = 0
-    for label, pr_id in tracked:
-        pr = await bitbucket.get_pull_request_safe(
-            mapping["workspace"], mapping["repo_slug"], pr_id
-        )
-        if not pr:
-            return f"{label} pull request #{pr_id} is no longer available"
-        state = BitbucketClient.pull_request_state(pr)
-        if state == "OPEN":
-            open_count += 1
-        elif state in ("DECLINED", "SUPERSEDED"):
-            return f"{label} pull request #{pr_id} was declined"
-
-    if open_count == 0:
-        return "All pull requests are closed"
 
     return None
 
@@ -1228,17 +2345,18 @@ async def _apply_revision_deletions(
     changed_files: list,
     issue_key: str,
     summary: str,
+    session: dict,
 ) -> tuple[list[str], str]:
     if not _revision_prompt_requests_deletion(revision_prompt):
         return [], ""
-    if not settings.openai_configured:
+    if not openai_configured(session):
         return [], ""
 
     branch_paths = _branch_paths_from_changed_files(changed_files)
     if not branch_paths:
         return [], ""
 
-    openai = OpenAIClient()
+    openai = _openai_client(session)
     delete_paths = await openai.identify_files_to_delete(
         issue_key,
         summary,
@@ -1315,6 +2433,7 @@ async def _sync_pr_changed_files(
     else:
         run.context_data = fresh_ctx
 
+    await db.refresh(run)
     return run
 
 
@@ -1333,14 +2452,16 @@ async def apply_code_revision(
 
     ctx = dict(run.context_data or {})
     mapping = await _resolve_run_mapping(db, run, ctx)
+    if mapping:
+        ctx["mapping"] = mapping
     branch_name = run.branch_name or ctx.get("branch_name")
     if not mapping or not branch_name:
         raise PipelineError("Missing branch or repo mapping")
     if ctx.get("beta_merged") and ctx.get("master_merged"):
         raise PipelineError("All pull requests are already merged")
 
-    if not settings.bitbucket_configured:
-        raise PipelineError("Bitbucket credentials are not configured")
+    if not bitbucket_configured(session):
+        raise PipelineError("Bitbucket credentials are not configured. Add them in Settings.")
 
     revision_prompt = prompt.strip()
     if not revision_prompt:
@@ -1359,7 +2480,7 @@ async def apply_code_revision(
     await _log_step(db, run, "revision_prepare", "running", "Loading branch context…")
     await db.commit()
 
-    bitbucket = BitbucketClient(settings.bitbucket_username, settings.bitbucket_app_password)
+    bitbucket = _bitbucket_client(session)
 
     try:
         changed_files = ctx.get("changed_files") or []
@@ -1383,20 +2504,28 @@ async def apply_code_revision(
             run,
             "revision_generate",
             "running",
-            "Running Cursor agent…" if settings.cursor_configured else "Generating changes with AI…",
+            "Running Cursor agent…" if cursor_configured(session) else "Generating changes with AI…",
         )
         await db.commit()
 
-        if settings.cursor_configured:
+        if cursor_configured(session):
             repo_url = BitbucketClient.repo_html_url(mapping["workspace"], mapping["repo_slug"])
+            rules = (mapping.get("rules") or "").strip()
+            skills = (mapping.get("skills") or "").strip()
             try:
                 result = run_revision_agent(
                     issue_key=run.jira_issue_key,
                     summary=ctx.get("summary", run.summary),
+                    description=_ticket_context_for_ai(ctx),
                     branch_name=branch_name,
                     master_branch=mapping["master_branch"],
                     repo_url=repo_url,
                     revision_prompt=revision_prompt,
+                    api_key=cursor_api_key(session),
+                    model=cursor_model(session),
+                    rules=rules,
+                    skills=skills,
+                    repo_stack_summary=ctx.get("repo_stack_summary", ""),
                 )
                 notes = result.get("implementation_notes", "")
                 used_cursor = True
@@ -1415,12 +2544,23 @@ async def apply_code_revision(
                     "Commit handled by Cursor agent",
                 )
             except CursorDevelopmentError:
-                if not settings.openai_configured:
+                if not openai_configured(session):
                     raise
 
         if not used_cursor:
-            if not settings.openai_configured:
-                raise PipelineError("CURSOR_API_KEY or OPENAI_API_KEY is required for code revisions")
+            if not openai_configured(session):
+                raise PipelineError(
+                    "Cursor API key or OpenAI API key is required for code revisions. Add them in Settings."
+                )
+
+            if not ctx.get("repo_stack_summary") and mapping:
+                summary, _loaded = await probe_repository_stack(
+                    bitbucket,
+                    mapping["workspace"],
+                    mapping["repo_slug"],
+                    branch_name,
+                )
+                ctx["repo_stack_summary"] = summary
 
             branch_paths = _branch_paths_from_changed_files(changed_files)
             current_files = await _load_branch_file_contents(
@@ -1442,13 +2582,18 @@ async def apply_code_revision(
                     "The pull request may have been declined — use Decline PR & restart or reload the page."
                 )
 
-            openai = OpenAIClient()
+            rules = (mapping.get("rules") or "").strip()
+            skills = (mapping.get("skills") or "").strip()
+            openai = _openai_client(session)
             code_result = await openai.apply_code_revision(
                 run.jira_issue_key,
                 ctx.get("summary", run.summary),
                 revision_prompt,
                 current_files,
                 branch_paths=branch_paths,
+                rules=rules,
+                skills=skills,
+                repo_stack_summary=ctx.get("repo_stack_summary", ""),
             )
             files = code_result.get("files", [])
             file_map, deleted_paths = _partition_revision_files(files)
@@ -1500,7 +2645,7 @@ async def apply_code_revision(
                 f"Committed to `{branch_name}` ({', '.join(commit_parts)})",
             )
         elif _revision_prompt_requests_deletion(revision_prompt):
-            if settings.openai_configured:
+            if openai_configured(session):
                 await _log_step(
                     db,
                     run,
@@ -1522,6 +2667,7 @@ async def apply_code_revision(
                     paths_source,
                     run.jira_issue_key,
                     ctx.get("summary", run.summary),
+                    session,
                 )
                 if delete_paths:
                     _update_code_result_files(ctx, {}, delete_paths, delete_notes)
@@ -1550,7 +2696,7 @@ async def apply_code_revision(
                     run,
                     "revision_delete",
                     "completed",
-                    "File removal was requested; configure OPENAI_API_KEY to auto-delete files after Cursor revisions",
+                    "File removal was requested; add an OpenAI API key in Settings to auto-delete files after Cursor revisions",
                 )
 
         await _log_step(db, run, "revision_refresh", "running", "Refreshing changed files…")
@@ -1611,7 +2757,13 @@ async def apply_code_revision(
         raise PipelineError(str(exc)) from exc
 
 
-def reset_run_to_estimation(run: DeliveryRun, *, summary: str | None = None, notice: str = "") -> None:
+def reset_run_to_estimation(
+    run: DeliveryRun,
+    *,
+    summary: str | None = None,
+    notice: str = "",
+    workflow_phase: str = "estimation",
+) -> None:
     """Clear implementation/PR state and return the run to Step 1 (estimation)."""
     ctx = dict(run.context_data or {})
     run.status = "active"
@@ -1624,12 +2776,83 @@ def reset_run_to_estimation(run: DeliveryRun, *, summary: str | None = None, not
     run.pr_url = None
     run.pr_id = None
     fresh_ctx = {
-        "workflow_phase": "estimation",
+        "workflow_phase": workflow_phase,
         "summary": summary or ctx.get("summary") or run.summary,
     }
     if notice.strip():
         fresh_ctx["workflow_notice"] = notice.strip()
     run.context_data = fresh_ctx
+
+
+async def restart_after_waiting_for_info_in_jira(
+    db: AsyncSession,
+    run: DeliveryRun,
+    session: dict,
+    snapshot: dict,
+) -> DeliveryRun:
+    """Full workflow reset when Jira ticket returns to waiting-for-information."""
+    ctx = dict(run.context_data or {})
+    mapping = await _resolve_run_mapping(db, run, ctx)
+    message = (
+        "The Jira ticket is waiting for information. "
+        "Delivery workflow restarted from estimation."
+    )
+
+    run.status = "running"
+    run.error_message = None
+    await _log_step(
+        db,
+        run,
+        "restart_waiting_for_info",
+        "running",
+        "Restarting after Jira moved to waiting for information…",
+    )
+    await db.commit()
+
+    try:
+        if bitbucket_configured(session) and mapping:
+            bitbucket = _bitbucket_client(session)
+            beta_pr_id, master_pr_id = _pr_ids_for_run(run, ctx)
+            if beta_pr_id or master_pr_id or run.pr_id:
+                await _decline_tracked_prs(bitbucket, mapping, run, ctx, message)
+
+            branch_name = run.branch_name or ctx.get("branch_name")
+            if branch_name:
+                try:
+                    await bitbucket.delete_branch(
+                        mapping["workspace"],
+                        mapping["repo_slug"],
+                        branch_name,
+                    )
+                except Exception:
+                    pass
+
+        reset_run_to_estimation(
+            run,
+            summary=snapshot.get("summary") or run.summary,
+            notice=message,
+            workflow_phase="waiting_for_info",
+        )
+        fresh_ctx = dict(run.context_data or {})
+        fresh_ctx["description"] = snapshot.get("description", "")
+        fresh_ctx["status_name"] = snapshot.get("status_name", "")
+        fresh_ctx["jira_comments"] = snapshot.get("jira_comments", [])
+        fresh_ctx["jira_synced_at"] = datetime.now(timezone.utc).isoformat()
+        run.context_data = fresh_ctx
+        run.summary = snapshot.get("summary") or run.summary
+
+        await _log_step(db, run, "restart_waiting_for_info", "completed", message)
+        run.status = "active"
+        await db.commit()
+        await db.refresh(run)
+        return await _auto_prepare_estimation_if_needed(db, run, session, snapshot)
+    except Exception as exc:
+        run.status = "failed"
+        run.error_message = str(exc)
+        await _log_step(db, run, "restart_waiting_for_info", "failed", str(exc))
+        await db.commit()
+        await db.refresh(run)
+        raise
 
 
 async def restart_delivery_workflow(
@@ -1657,8 +2880,8 @@ async def restart_delivery_workflow(
     already_closed: list[str] = []
 
     try:
-        if settings.bitbucket_configured and mapping:
-            bitbucket = BitbucketClient(settings.bitbucket_username, settings.bitbucket_app_password)
+        if bitbucket_configured(session) and mapping:
+            bitbucket = _bitbucket_client(session)
             workspace = mapping["workspace"]
             repo_slug = mapping["repo_slug"]
 
@@ -1776,10 +2999,15 @@ async def sync_pr_review_state(
 
     ctx = dict(run.context_data or {})
     mapping = await _resolve_run_mapping(db, run, ctx)
-    if not mapping or not settings.bitbucket_configured:
+    if not mapping or not bitbucket_configured(session):
         return run
 
-    bitbucket = BitbucketClient(settings.bitbucket_username, settings.bitbucket_app_password)
+    bitbucket = _bitbucket_client(session)
+    if await _forget_inactive_tracked_prs(bitbucket, mapping, run, ctx):
+        run.context_data = ctx
+        await db.commit()
+        await db.refresh(run)
+
     stale_reason = await _check_pr_review_stale(run, ctx, mapping, bitbucket)
     if not stale_reason:
         return await _sync_pr_changed_files(db, run, ctx, mapping, bitbucket)
@@ -1826,6 +3054,7 @@ async def decline_prs_and_restart(
 async def get_run_file_diff(
     db: AsyncSession,
     run: DeliveryRun,
+    session: dict,
     file_path: str,
 ) -> dict:
     ctx = dict(run.context_data or {})
@@ -1862,7 +3091,7 @@ async def get_run_file_diff(
     if action in ("create", "added"):
         action = "add"
 
-    bitbucket = BitbucketClient(settings.bitbucket_username, settings.bitbucket_app_password)
+    bitbucket = _bitbucket_client(session)
     workspace = mapping_data["workspace"]
     repo_slug = mapping_data["repo_slug"]
     base_ref = mapping_data["master_branch"]
@@ -1923,6 +3152,8 @@ async def _step_resolve_mapping(db, run, jira, ctx) -> tuple[str, dict]:
         "beta_branch": mapping.beta_branch,
         "beta_website_url": mapping.beta_website_url,
         "master_website_url": mapping.master_website_url,
+        "rules": mapping.rules,
+        "skills": mapping.skills,
     }
     return (
         f"Repo: {mapping.bitbucket_workspace}/{mapping.bitbucket_repo_slug} "
@@ -1931,23 +3162,30 @@ async def _step_resolve_mapping(db, run, jira, ctx) -> tuple[str, dict]:
     )
 
 
-async def _step_create_branch(db, run, jira, ctx) -> tuple[str, dict]:
-    if not settings.bitbucket_configured:
-        raise PipelineError("Bitbucket credentials are not configured")
+async def _step_create_branch(db, run, jira, ctx, session) -> tuple[str, dict]:
+    if not bitbucket_configured(session):
+        raise PipelineError("Bitbucket credentials are not configured. Add them in Settings.")
     mapping = ctx.get("mapping")
     if not mapping:
         raise PipelineError("Run resolve mapping step first")
 
     branch_name = run.branch_name or ctx.get("branch_name")
     if not branch_name:
-        branch_name = f"feature/{run.jira_issue_key.lower()}-{slugify(ctx.get('summary', run.summary))}"
+        branch_name = f"feature/{run.jira_issue_key}-{slugify(ctx.get('summary', run.summary))}"
 
-    bitbucket = BitbucketClient(settings.bitbucket_username, settings.bitbucket_app_password)
-    if await bitbucket.branch_exists(
-        mapping["workspace"],
-        mapping["repo_slug"],
-        branch_name,
-    ):
+    bitbucket = _bitbucket_client(session)
+    try:
+        branch_exists = await bitbucket.branch_exists(
+            mapping["workspace"],
+            mapping["repo_slug"],
+            branch_name,
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in (401, 403):
+            raise PipelineError(BitbucketClient.http_error_detail(exc)) from exc
+        raise PipelineError(f"Bitbucket branch lookup failed: {exc}") from exc
+
+    if branch_exists:
         run.branch_name = branch_name
         await db.commit()
         return (
@@ -1974,8 +3212,10 @@ async def _step_create_branch(db, run, jira, ctx) -> tuple[str, dict]:
             raise PipelineError(
                 f"Branch `{mapping['master_branch']}` not found in "
                 f"{mapping['workspace']}/{mapping['repo_slug']}. "
-                "Update the master branch in Admin → Mappings."
+                "Update the production branch in Admin → Mappings."
             ) from exc
+        if exc.response.status_code in (401, 403):
+            raise PipelineError(BitbucketClient.http_error_detail(exc)) from exc
         raise PipelineError(f"Bitbucket branch creation failed: {exc}") from exc
     except Exception as exc:
         raise PipelineError(f"Bitbucket branch creation failed: {exc}") from exc
@@ -1987,73 +3227,87 @@ async def _step_create_branch(db, run, jira, ctx) -> tuple[str, dict]:
     )
 
 
-async def _step_cursor_development(db, run, jira, ctx) -> tuple[str, dict]:
-    mapping = ctx.get("mapping")
+async def _step_cursor_development(db, run, jira, ctx, session) -> tuple[str, dict]:
+    mapping = await _resolve_run_mapping(db, run, ctx)
+    if mapping:
+        ctx["mapping"] = mapping
     branch_name = run.branch_name or ctx.get("branch_name")
     if not mapping or not branch_name:
         raise PipelineError("Run create branch step first")
 
-    if settings.cursor_configured:
+    rules = (mapping.get("rules") or "").strip()
+    skills = (mapping.get("skills") or "").strip()
+
+    if cursor_configured(session):
         repo_url = BitbucketClient.repo_html_url(mapping["workspace"], mapping["repo_slug"])
         try:
             result = run_implementation_agent(
                 issue_key=run.jira_issue_key,
                 summary=ctx.get("summary", run.summary),
-                description=ctx.get("description", ""),
+                description=_ticket_context_for_ai(ctx),
                 branch_name=branch_name,
                 master_branch=mapping["master_branch"],
                 repo_url=repo_url,
-                repo_context=ctx.get("repo_context", ""),
+                api_key=cursor_api_key(session),
+                model=cursor_model(session),
+                rules=rules,
+                skills=skills,
+                repo_stack_summary=ctx.get("repo_stack_summary", ""),
             )
             notes = result.get("implementation_notes", "")
+            rules_note = ""
+            if rules or skills:
+                rules_note = " (with project rules/skills)"
             return (
-                f"Cursor SDK completed development on `{branch_name}`\n\n{notes[:500]}",
+                f"Cursor SDK completed development on `{branch_name}`{rules_note}\n\n{notes[:500]}",
                 {"development_result": result, "code_result": {"implementation_notes": notes, "files": []}},
             )
         except CursorDevelopmentError as exc:
-            if not settings.openai_configured:
+            if not openai_configured(session):
                 raise PipelineError(str(exc)) from exc
 
     return (
-        "Cursor SDK not configured — using OpenAI for code generation",
+        "Cursor SDK not configured — using OpenAI for code generation (with project rules/skills and repo stack)",
         {"development_result": {"source": "openai_fallback"}},
     )
 
 
-async def _step_repo_context(db, run, jira, ctx) -> tuple[str, dict]:
-    if not settings.bitbucket_configured:
-        raise PipelineError("Bitbucket credentials are not configured")
+async def _step_repo_stack(db, run, jira, ctx, session) -> tuple[str, dict]:
+    if not bitbucket_configured(session):
+        raise PipelineError("Bitbucket credentials are not configured. Add them in Settings.")
     mapping = ctx.get("mapping")
     if not mapping:
         raise PipelineError("Run resolve mapping step first")
 
-    bitbucket = BitbucketClient(settings.bitbucket_username, settings.bitbucket_app_password)
-    context_parts: list[str] = []
-    loaded: list[str] = []
-    for path in ["README.md", "readme.md", "package.json", "pyproject.toml", "composer.json"]:
-        content = await bitbucket.get_file(
-            mapping["workspace"], mapping["repo_slug"], path, mapping["master_branch"]
-        )
-        if content:
-            context_parts.append(f"--- {path} ---\n{content[:3000]}")
-            loaded.append(path)
-
-    repo_context = "\n\n".join(context_parts) or "(no repo files found)"
+    branch_name = run.branch_name or ctx.get("branch_name")
+    ref = branch_name or mapping["master_branch"]
+    bitbucket = _bitbucket_client(session)
+    summary, loaded = await probe_repository_stack(
+        bitbucket,
+        mapping["workspace"],
+        mapping["repo_slug"],
+        ref,
+    )
     return (
-        f"Loaded {len(loaded)} file(s): {', '.join(loaded) or 'none'}",
-        {"repo_context": repo_context, "loaded_files": loaded},
+        f"Detected stack from {len(loaded)} file(s): {', '.join(loaded) or 'none'}",
+        {"repo_stack_summary": summary, "repo_stack_files": loaded},
     )
 
 
-async def _step_generate_code(db, run, jira, ctx) -> tuple[str, dict]:
-    if not settings.openai_configured:
-        raise PipelineError("OPENAI_API_KEY is not configured")
-    openai = OpenAIClient()
+async def _step_generate_code(db, run, jira, ctx, session) -> tuple[str, dict]:
+    if not openai_configured(session):
+        raise PipelineError("OpenAI API key is not configured. Add it in Settings.")
+    mapping = ctx.get("mapping") or await _resolve_run_mapping(db, run, ctx)
+    rules = (mapping.get("rules") or "").strip() if mapping else ""
+    skills = (mapping.get("skills") or "").strip() if mapping else ""
+    openai = _openai_client(session)
     code_result = await openai.generate_code_changes(
         run.jira_issue_key,
         ctx.get("summary", run.summary),
-        ctx.get("description", ""),
-        ctx.get("repo_context", ""),
+        _ticket_context_for_ai(ctx),
+        rules=rules,
+        skills=skills,
+        repo_stack_summary=ctx.get("repo_stack_summary", ""),
     )
     files = code_result.get("files", [])
     if not files:
@@ -2066,9 +3320,9 @@ async def _step_generate_code(db, run, jira, ctx) -> tuple[str, dict]:
     )
 
 
-async def _step_commit_changes(db, run, jira, ctx) -> tuple[str, dict]:
-    if not settings.bitbucket_configured:
-        raise PipelineError("Bitbucket credentials are not configured")
+async def _step_commit_changes(db, run, jira, ctx, session) -> tuple[str, dict]:
+    if not bitbucket_configured(session):
+        raise PipelineError("Bitbucket credentials are not configured. Add them in Settings.")
     mapping = ctx.get("mapping")
     code_result = ctx.get("code_result")
     if not mapping or not code_result:
@@ -2086,7 +3340,7 @@ async def _step_commit_changes(db, run, jira, ctx) -> tuple[str, dict]:
     notes = code_result.get("implementation_notes", "")
     commit_message = f"{run.jira_issue_key}: {run.summary}\n\n{notes}\n\nDelivery Manager"
 
-    bitbucket = BitbucketClient(settings.bitbucket_username, settings.bitbucket_app_password)
+    bitbucket = _bitbucket_client(session)
     parent_commit = await bitbucket.get_branch_commit(
         mapping["workspace"],
         mapping["repo_slug"],
@@ -2117,15 +3371,36 @@ def _pr_description(run: DeliveryRun, ctx: dict) -> str:
     )
 
 
-async def _step_create_pr_beta(db, run, jira, ctx) -> tuple[str, dict]:
-    if not settings.bitbucket_configured:
-        raise PipelineError("Bitbucket credentials are not configured")
+async def _step_create_pr_beta(db, run, jira, ctx, session) -> tuple[str, dict]:
+    if not bitbucket_configured(session):
+        raise PipelineError("Bitbucket credentials are not configured. Add them in Settings.")
     mapping = ctx.get("mapping")
     branch_name = run.branch_name or ctx.get("branch_name")
     if not mapping or not branch_name:
         raise PipelineError("Run commit changes step first")
 
-    bitbucket = BitbucketClient(settings.bitbucket_username, settings.bitbucket_app_password)
+    bitbucket = _bitbucket_client(session)
+    existing_id = ctx.get("beta_pr_id") or run.pr_id
+    if existing_id and not ctx.get("beta_merged"):
+        existing = await bitbucket.get_pull_request_safe(
+            mapping["workspace"], mapping["repo_slug"], int(existing_id)
+        )
+        if existing and BitbucketClient.is_pull_request_open(existing):
+            beta_pr_url = BitbucketClient.pr_html_url(existing)
+            run.pr_id = int(existing_id)
+            run.pr_url = beta_pr_url
+            await db.commit()
+            return (
+                f"Reusing open Beta pull request: {beta_pr_url or f'#{existing_id}'}\n"
+                f"{branch_name} → {mapping['beta_branch']}",
+                {
+                    "beta_pr_url": beta_pr_url,
+                    "beta_pr_id": int(existing_id),
+                    "pr_url": beta_pr_url,
+                    "pr_id": int(existing_id),
+                },
+            )
+
     pr = await bitbucket.create_pull_request(
         mapping["workspace"],
         mapping["repo_slug"],
@@ -2147,19 +3422,38 @@ async def _step_create_pr_beta(db, run, jira, ctx) -> tuple[str, dict]:
     )
 
 
-async def _step_create_pr_master(db, run, jira, ctx) -> tuple[str, dict]:
-    if not settings.bitbucket_configured:
-        raise PipelineError("Bitbucket credentials are not configured")
+async def _step_create_pr_master(db, run, jira, ctx, session) -> tuple[str, dict]:
+    if not bitbucket_configured(session):
+        raise PipelineError("Bitbucket credentials are not configured. Add them in Settings.")
     mapping = ctx.get("mapping")
+    if mapping and is_unified_deploy_target(mapping):
+        return (
+            f"Skipped Live PR — staging and live share target branch `{mapping['beta_branch']}`",
+            {"master_pr_skipped": True},
+        )
     branch_name = run.branch_name or ctx.get("branch_name")
     if not mapping or not branch_name:
         raise PipelineError("Run commit changes step first")
 
-    bitbucket = BitbucketClient(settings.bitbucket_username, settings.bitbucket_app_password)
+    bitbucket = _bitbucket_client(session)
+    existing_id = ctx.get("master_pr_id")
+    if existing_id and not ctx.get("master_merged"):
+        existing = await bitbucket.get_pull_request_safe(
+            mapping["workspace"], mapping["repo_slug"], int(existing_id)
+        )
+        if existing and BitbucketClient.is_pull_request_open(existing):
+            master_pr_url = BitbucketClient.pr_html_url(existing)
+            await db.commit()
+            return (
+                f"Reusing open Live pull request: {master_pr_url or f'#{existing_id}'}\n"
+                f"{branch_name} → {mapping['master_branch']}",
+                {"master_pr_url": master_pr_url, "master_pr_id": int(existing_id)},
+            )
+
     pr = await bitbucket.create_pull_request(
         mapping["workspace"],
         mapping["repo_slug"],
-        f"{run.jira_issue_key}: {run.summary} (Master)",
+        f"{run.jira_issue_key}: {run.summary} (Live)",
         branch_name,
         mapping["master_branch"],
         _pr_description(run, ctx),
@@ -2174,21 +3468,23 @@ async def _step_create_pr_master(db, run, jira, ctx) -> tuple[str, dict]:
     )
 
 
-async def _step_verify_website(db, run, jira, ctx, environment: str) -> tuple[str, dict]:
+async def _step_verify_website(db, run, jira, ctx, environment: str, session) -> tuple[str, dict]:
     mapping = ctx.get("mapping")
     if not mapping:
         raise PipelineError("Run resolve mapping step first")
 
     website_url = (
-        mapping["beta_website_url"] if environment == "Beta" else mapping["master_website_url"]
+        mapping["beta_website_url"]
+        if environment.lower() in ("beta", "staging")
+        else mapping["master_website_url"]
     ).strip()
     if not website_url:
         return (f"No {environment} website URL configured; skipped verification", {})
 
-    if not settings.openai_configured:
-        raise PipelineError("OPENAI_API_KEY is required for website verification")
+    if not openai_configured(session):
+        raise PipelineError("OpenAI API key is required for website verification. Add it in Settings.")
 
-    openai = OpenAIClient()
+    openai = _openai_client(session)
     result = await verify_website(
         issue_key=run.jira_issue_key,
         summary=ctx.get("summary", run.summary),
@@ -2203,7 +3499,7 @@ async def _step_verify_website(db, run, jira, ctx, environment: str) -> tuple[st
     findings = analysis.get("findings") or []
     findings_text = "\n".join(f"- {item}" for item in findings) or "- No specific findings"
     comment = (
-        f"[Delivery Manager] {environment} website verification\n\n"
+        f"[Delivery Manager] {environment} website testing\n\n"
         f"URL: {website_url}\n"
         f"Result: {'Passed' if analysis.get('passed') else 'Needs review'}\n\n"
         f"{analysis.get('summary', '')}\n\n"

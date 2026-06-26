@@ -12,9 +12,11 @@ import IssueSummary from "../components/IssueSummary";
 import IssueTable from "../components/IssueTable";
 import Layout from "../components/Layout";
 import ProjectList from "../components/ProjectList";
+import { useToast } from "../context/ToastContext";
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const { toast } = useToast();
   const [user, setUser] = useState<User | null>(null);
   const [siteName, setSiteName] = useState("");
   const [siteUrl, setSiteUrl] = useState("");
@@ -42,13 +44,14 @@ export default function Dashboard() {
         return;
       }
       setError(err instanceof Error ? err.message : "Something went wrong");
+      toast(err instanceof Error ? err.message : "Something went wrong", "error");
     },
-    [navigate],
+    [navigate, toast],
   );
 
   useEffect(() => {
     api
-      .getMe()
+      .ensureAuth()
       .then((data) => {
         setUser(data.user);
         setSiteName(data.site_name);
@@ -171,7 +174,9 @@ export default function Dashboard() {
       const run = await api.startRun(issue.key);
       navigate(`/deliver/${issue.key}`, { state: { run } });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to start delivery run");
+      const msg = err instanceof Error ? err.message : "Failed to start delivery run";
+      setError(msg);
+      toast(msg, "error");
     } finally {
       setDeliveringKey(null);
     }
@@ -200,10 +205,10 @@ export default function Dashboard() {
 
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-5 lg:gap-6 flex-1 min-h-0">
           <aside className="lg:col-span-1 flex flex-col min-h-0">
-            <div className="card overflow-hidden flex flex-col h-full min-h-0">
-              <div className="card-header flex-shrink-0">
-                <h2 className="card-title">Projects</h2>
-                <p className="card-subtitle">
+            <div className="card overflow-hidden flex flex-col h-full min-h-0 bg-slate-50/70 border-r border-slate-200/90 shadow-sm">
+              <div className="px-5 py-4 border-b border-slate-200/80 bg-slate-100/50 flex-shrink-0">
+                <h2 className="font-semibold text-slate-900 tracking-tight">Projects</h2>
+                <p className="text-xs text-slate-500 mt-0.5 font-normal">
                   {projectsLoading && projects.length === 0
                     ? "Loading..."
                     : `${projectsTotal} with Bitbucket`}

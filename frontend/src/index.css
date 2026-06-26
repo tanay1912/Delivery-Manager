@@ -3,10 +3,14 @@
 @tailwind utilities;
 
 @layer base {
+  html {
+    font-size: 15px;
+  }
+
   body {
-    @apply bg-surface-subtle text-slate-900 antialiased;
+    @apply bg-surface-subtle text-slate-900 antialiased text-[15px];
     background-image:
-      radial-gradient(ellipse 80% 50% at 50% -20%, rgb(99 102 241 / 0.08), transparent),
+      radial-gradient(ellipse 80% 50% at 50% -20%, rgb(37 99 235 / 0.05), transparent),
       radial-gradient(ellipse 60% 40% at 100% 0%, rgb(148 163 184 / 0.06), transparent);
     background-attachment: fixed;
   }
@@ -38,11 +42,15 @@
   }
 
   .btn-primary {
-    @apply btn px-4 py-2.5 bg-brand-600 text-white shadow-sm hover:bg-brand-700 hover:shadow focus-visible:ring-brand-500 active:scale-[0.98];
+    @apply btn px-4 py-2.5 bg-brand-600 text-white shadow-brand hover:bg-brand-700 hover:shadow-brand-md focus-visible:ring-brand-500 active:scale-[0.98];
   }
 
   .btn-secondary {
     @apply btn px-4 py-2.5 border border-slate-200 bg-white text-slate-700 shadow-sm hover:bg-slate-50 hover:border-slate-300 focus-visible:ring-slate-400 active:scale-[0.98];
+  }
+
+  .btn-highlight {
+    @apply btn px-4 py-2.5 border border-brand-200/80 bg-brand-50 text-brand-700 ring-1 ring-brand-200/40 hover:bg-brand-100 hover:border-brand-300 hover:text-brand-800 focus-visible:ring-brand-500 active:scale-[0.98];
   }
 
   .btn-ghost {
@@ -98,10 +106,110 @@
   }
 
   .nav-link {
-    @apply text-sm font-medium text-slate-600 px-3 py-2 rounded-lg transition-colors hover:text-slate-900 hover:bg-slate-100/80;
+    @apply text-sm font-medium text-slate-200 px-3.5 py-2 rounded-full transition-all hover:text-white hover:bg-white/10;
+  }
+
+  .alert-success {
+    @apply p-4 rounded-xl bg-emerald-50 border border-emerald-200/80 text-emerald-800 text-sm;
+  }
+
+  .btn-merge {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-bold bg-emerald-600 text-white shadow-md transition-all duration-150 hover:bg-emerald-700 hover:shadow-lg hover:scale-[1.02] focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none disabled:hover:scale-100;
+  }
+
+  .step-panel {
+    @apply rounded-xl border border-slate-200 bg-white shadow-sm;
+  }
+
+  .settings-section-card {
+    @apply card overflow-hidden;
+  }
+
+  .badge-disconnected {
+    @apply badge bg-red-50 text-red-700 ring-red-600/20;
   }
 
   .nav-link-active {
-    @apply nav-link text-brand-700 bg-brand-50 hover:bg-brand-50 hover:text-brand-800;
+    @apply text-sm font-semibold text-white px-3.5 py-2 rounded-full bg-white/15 shadow-sm ring-1 ring-white/20 hover:bg-white/20 hover:text-white;
+  }
+
+  .page-back-link {
+    @apply inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 flex-shrink-0;
+  }
+
+  .badge-status-progress {
+    @apply badge bg-blue-100 text-blue-800 ring-blue-600/20;
+  }
+
+  .badge-status-todo {
+    @apply badge bg-slate-200/80 text-slate-700 ring-slate-500/15;
+  }
+
+  .badge-status-testing {
+    @apply badge bg-orange-100 text-orange-800 ring-orange-600/25;
+  }
+
+  .badge-status-done {
+    @apply badge bg-emerald-100 text-emerald-800 ring-emerald-600/20;
+  }
+
+  .btn-deliver {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-full px-4 py-1.5 text-xs font-semibold bg-brand-600 text-white shadow-brand transition-all duration-150 hover:bg-brand-700 hover:shadow-brand-md hover:scale-105 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none disabled:hover:scale-100;
+  }
+
+  .table-header {
+    @apply text-left px-6 py-3.5 text-[11px] font-medium uppercase tracking-[0.08em] text-slate-500;
+  }
+
+  .tab-list {
+    @apply flex gap-1 p-1.5 border-b border-slate-200 bg-slate-50/60;
+  }
+
+  .tab {
+    @apply relative flex flex-1 items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-slate-600 transition-colors hover:text-slate-900 hover:bg-white/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/30 sm:flex-none sm:px-5;
+  }
+
+  .tab-active {
+    @apply tab bg-white text-brand-700 ring-1 ring-slate-200/80 hover:bg-white hover:text-brand-800;
+  }
+
+  .tab-status-dot {
+    @apply h-2 w-2 rounded-full flex-shrink-0;
+  }
+
+  .tab-status-dot-connected {
+    @apply tab-status-dot bg-emerald-500 ring-2 ring-emerald-500/20;
+  }
+
+  .tab-status-dot-disconnected {
+    @apply tab-status-dot bg-slate-300;
+  }
+
+  .stat-pill {
+    @apply inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium ring-1 ring-inset;
+  }
+
+  .stat-pill-success {
+    @apply stat-pill bg-emerald-50 text-emerald-700 ring-emerald-600/20;
+  }
+
+  .stat-pill-warning {
+    @apply stat-pill bg-amber-50 text-amber-700 ring-amber-600/20;
+  }
+
+  .form-section-title {
+    @apply text-xs font-semibold uppercase tracking-wider text-slate-500;
+  }
+
+  .empty-state {
+    @apply flex flex-col items-center justify-center text-center px-6 py-10;
+  }
+
+  .empty-state-icon {
+    @apply flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-400 mb-4;
+  }
+
+  .external-link {
+    @apply inline-flex items-center gap-1 text-brand-600 hover:text-brand-700 transition-colors;
   }
 }

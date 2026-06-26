@@ -1,5 +1,7 @@
 import uuid
+from datetime import datetime, timezone
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -16,10 +18,12 @@ from app.schemas.runs import (
     FileDiffResponse,
     PostEstimationRequest,
     RequestInfoRequest,
+    RetryDeploymentRequest,
     RunListResponse,
     StartRunRequest,
     run_to_response,
 )
+from app.services.deploy_commands import fetch_all_deploy_commands_from_db
 from app.services.delivery_pipeline import (
     PipelineError,
     apply_code_revision,
@@ -28,13 +32,21 @@ from app.services.delivery_pipeline import (
     ensure_in_estimation_status,
     get_run_file_diff,
     get_workflow_phase,
+    has_pending_post_merge_work,
     merge_pr_target,
     post_estimation,
     prepare_estimation,
     request_info,
     reset_run_to_estimation,
+    reload_jira_issue,
+    resume_open_pr_review_if_needed,
+    resume_post_merge_workflow_if_needed,
+    retry_deployment,
     start_implementation,
     sync_pr_review_state,
+    sync_jira_workflow_state,
+    _auto_prepare_estimation_if_needed,
+    _fetch_issue_snapshot,
 )
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
@@ -42,9 +54,29 @@ router = APIRouter(prefix="/api/runs", tags=["runs"])
 _OPEN_RUN_STATUSES = ("active", "running", "awaiting_approval", "failed")
 
 
-def _run_response(run: DeliveryRun, session: dict | None = None) -> DeliveryRunResponse:
+async def _run_response(
+    run: DeliveryRun,
+    session: dict | None = None,
+    db: AsyncSession | None = None,
+) -> DeliveryRunResponse:
+    if db is not None:
+        await db.refresh(run)
     site_url = session.get("site_url") if session else None
-    return run_to_response(run, site_url=site_url)
+    staging_deploy_commands: list[str] = []
+    live_deploy_commands: list[str] = []
+    if db is not None:
+        ctx = run.context_data or {}
+        phase = get_workflow_phase(run)
+        if phase == "pr_review" or ctx.get("pending_deploy_retry") or has_pending_post_merge_work(run):
+            commands = await fetch_all_deploy_commands_from_db(db, run.project_key)
+            staging_deploy_commands = commands["beta"]
+            live_deploy_commands = commands["master"]
+    return run_to_response(
+        run,
+        site_url=site_url,
+        staging_deploy_commands=staging_deploy_commands,
+        live_deploy_commands=live_deploy_commands,
+    )
 
 
 async def _find_open_run(db: AsyncSession, issue_key: str) -> DeliveryRun | None:
@@ -60,12 +92,44 @@ async def _find_open_run(db: AsyncSession, issue_key: str) -> DeliveryRun | None
     return result.scalars().first()
 
 
-def _apply_issue_to_run(run: DeliveryRun, issue: dict) -> None:
-    fields = issue.get("fields", {})
-    project = fields.get("project") or {}
-    run.jira_issue_id = str(issue.get("id", ""))
-    run.project_key = project.get("key", run.jira_issue_key.split("-")[0])
-    run.summary = fields.get("summary") or run.jira_issue_key
+async def _find_resumable_run(db: AsyncSession, issue_key: str) -> DeliveryRun | None:
+    """Find an open run or the latest run with unfinished post-merge delivery work."""
+    open_run = await _find_open_run(db, issue_key)
+    if open_run:
+        return open_run
+
+    result = await db.execute(
+        select(DeliveryRun)
+        .where(DeliveryRun.jira_issue_key == issue_key)
+        .order_by(DeliveryRun.created_at.desc())
+        .limit(5)
+    )
+    for run in result.scalars().all():
+        if has_pending_post_merge_work(run):
+            return run
+    return None
+
+
+def _should_preserve_failed_run(run: DeliveryRun) -> bool:
+    if has_pending_post_merge_work(run):
+        return True
+    return get_workflow_phase(run) in (
+        "pr_review",
+        "implementation",
+        "ready_for_implementation",
+    )
+
+
+def _apply_issue_to_run(run: DeliveryRun, snapshot: dict) -> None:
+    run.jira_issue_id = snapshot["issue_id"]
+    run.project_key = snapshot["project_key"]
+    run.summary = snapshot["summary"]
+    ctx = dict(run.context_data or {})
+    ctx["summary"] = snapshot["summary"]
+    ctx["description"] = snapshot["description"]
+    ctx["status_name"] = snapshot["status_name"]
+    ctx["jira_comments"] = snapshot["jira_comments"]
+    run.context_data = ctx
 
 
 def _reset_failed_run(run: DeliveryRun) -> None:
@@ -82,30 +146,55 @@ async def start_run(
     jira = jira_client_from_session(session)
 
     try:
-        issue = await jira.get_issue(issue_key)
+        snapshot = await _fetch_issue_snapshot(jira, issue_key)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Issue {issue_key} was not found or you do not have permission to view it. "
+                    "If you use a scoped Jira API token, log out and log back in so the app can "
+                    "use the correct Atlassian API URL."
+                ),
+            ) from exc
+        raise HTTPException(status_code=502, detail=f"Could not load issue {issue_key} from Jira.") from exc
     except Exception as exc:
         raise HTTPException(status_code=404, detail=f"Issue {issue_key} not found: {exc}") from exc
 
+    synced_at = datetime.now(timezone.utc).isoformat()
+
     try:
-        existing = await _find_open_run(db, issue_key)
+        existing = await _find_resumable_run(db, issue_key)
         if existing:
-            if existing.status != "failed":
+            if existing.status == "failed" and _should_preserve_failed_run(existing):
                 run = existing
+                _apply_issue_to_run(run, snapshot)
+            elif existing.status != "failed":
+                run = existing
+                _apply_issue_to_run(run, snapshot)
             else:
                 _reset_failed_run(existing)
-                _apply_issue_to_run(existing, issue)
+                _apply_issue_to_run(existing, snapshot)
                 run = existing
+            ctx = dict(run.context_data or {})
+            ctx["jira_synced_at"] = synced_at
+            run.context_data = ctx
         else:
-            fields = issue.get("fields", {})
-            project = fields.get("project") or {}
             run = DeliveryRun(
                 jira_issue_key=issue_key,
-                jira_issue_id=str(issue.get("id", "")),
-                project_key=project.get("key", issue_key.split("-")[0]),
-                summary=fields.get("summary") or issue_key,
+                jira_issue_id=snapshot["issue_id"],
+                project_key=snapshot["project_key"],
+                summary=snapshot["summary"],
                 status="active",
                 steps_log=[],
-                context_data={"workflow_phase": "estimation"},
+                context_data={
+                    "workflow_phase": "estimation",
+                    "summary": snapshot["summary"],
+                    "description": snapshot["description"],
+                    "status_name": snapshot["status_name"],
+                    "jira_comments": snapshot["jira_comments"],
+                    "jira_synced_at": synced_at,
+                },
             )
             db.add(run)
 
@@ -118,10 +207,14 @@ async def start_run(
             detail="Could not save delivery run. Check database connectivity.",
         ) from exc
 
+    run = await resume_post_merge_workflow_if_needed(db, run, session)
+    run = await resume_open_pr_review_if_needed(db, run, session)
+    if get_workflow_phase(run) == "pr_review" or has_pending_post_merge_work(run):
+        return await _run_response(run, session, db)
+
     phase = get_workflow_phase(run)
     if phase in ("estimation", ""):
-        fields = issue.get("fields", {})
-        status_name = (fields.get("status") or {}).get("name", "")
+        status_name = snapshot["status_name"]
         try:
             new_status = await ensure_in_estimation_status(jira, issue_key, status_name)
             ctx = dict(run.context_data or {})
@@ -143,7 +236,12 @@ async def start_run(
                 detail=f"Failed to update Jira status: {exc}",
             ) from exc
 
-    return _run_response(run, session)
+        try:
+            run = await _auto_prepare_estimation_if_needed(db, run, session, snapshot)
+        except Exception:
+            await db.refresh(run)
+
+    return await _run_response(run, session, db)
 
 
 @router.get("/by-issue/{issue_key}", response_model=DeliveryRunResponse)
@@ -152,11 +250,32 @@ async def get_run_by_issue(
     session: dict = Depends(require_auth),
     db: AsyncSession = Depends(get_db),
 ):
-    run = await _find_open_run(db, issue_key.strip().upper())
+    run = await _find_resumable_run(db, issue_key.strip().upper())
     if not run:
         raise HTTPException(status_code=404, detail="No active delivery run for this issue")
+    run = await sync_jira_workflow_state(db, run, session)
     run = await sync_pr_review_state(db, run, session)
-    return _run_response(run, session)
+    return await _run_response(run, session, db)
+
+
+@router.post("/{run_id}/reload-jira", response_model=DeliveryRunResponse)
+async def reload_jira_endpoint(
+    run_id: uuid.UUID,
+    session: dict = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    run = await db.get(DeliveryRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.status == "running":
+        raise HTTPException(status_code=409, detail="Cannot reload while a step is running")
+
+    try:
+        run = await reload_jira_issue(db, run, session)
+    except PipelineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await _run_response(run, session, db)
 
 
 @router.post("/{run_id}/prepare-estimation", response_model=DeliveryRunResponse)
@@ -176,7 +295,7 @@ async def prepare_estimation_endpoint(
     except PipelineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _run_response(run, session)
+    return await _run_response(run, session, db)
 
 
 @router.post("/{run_id}/post-estimation", response_model=DeliveryRunResponse)
@@ -197,7 +316,7 @@ async def post_estimation_endpoint(
     except PipelineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _run_response(run, session)
+    return await _run_response(run, session, db)
 
 
 @router.post("/{run_id}/request-info", response_model=DeliveryRunResponse)
@@ -218,7 +337,7 @@ async def request_info_endpoint(
     except PipelineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _run_response(run, session)
+    return await _run_response(run, session, db)
 
 
 @router.post("/{run_id}/start-implementation", response_model=DeliveryRunResponse)
@@ -237,14 +356,14 @@ async def start_implementation_endpoint(
     if phase in ("implementation", "pr_review") and run.status != "failed":
         raise HTTPException(status_code=409, detail="Implementation is already in progress")
     if phase == "completed" or run.status == "awaiting_approval":
-        return _run_response(run, session)
+        return await _run_response(run, session, db)
 
     try:
         run = await start_implementation(db, run, session)
     except PipelineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _run_response(run, session)
+    return await _run_response(run, session, db)
 
 
 @router.get("/{run_id}", response_model=DeliveryRunResponse)
@@ -256,8 +375,9 @@ async def get_run(
     run = await db.get(DeliveryRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
+    run = await sync_jira_workflow_state(db, run, session)
     run = await sync_pr_review_state(db, run, session)
-    return _run_response(run, session)
+    return await _run_response(run, session, db)
 
 
 @router.get("", response_model=RunListResponse)
@@ -270,7 +390,9 @@ async def list_runs(
     if issue_key:
         query = query.where(DeliveryRun.jira_issue_key == issue_key.strip().upper())
     result = await db.execute(query.limit(20))
-    return RunListResponse(runs=[_run_response(r, session) for r in result.scalars().all()])
+    runs = list(result.scalars().all())
+    responses = [await _run_response(run, session, db) for run in runs]
+    return RunListResponse(runs=responses)
 
 
 @router.post("/{run_id}/merge", response_model=DeliveryRunResponse)
@@ -303,7 +425,7 @@ async def merge_run_pr(
     except PipelineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _run_response(run, session)
+    return await _run_response(run, session, db)
 
 
 @router.post("/{run_id}/merge/beta", response_model=DeliveryRunResponse)
@@ -330,7 +452,7 @@ async def merge_beta_pr(
     except PipelineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _run_response(run, session)
+    return await _run_response(run, session, db)
 
 
 @router.post("/{run_id}/merge/master", response_model=DeliveryRunResponse)
@@ -357,7 +479,39 @@ async def merge_master_pr(
     except PipelineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _run_response(run, session)
+    return await _run_response(run, session, db)
+
+
+@router.post("/{run_id}/retry-deployment", response_model=DeliveryRunResponse)
+async def retry_run_deployment(
+    run_id: uuid.UUID,
+    body: RetryDeploymentRequest | None = None,
+    session: dict = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    run = await db.get(DeliveryRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    result = await db.execute(
+        select(ProjectRepoMapping).where(ProjectRepoMapping.jira_project_key == run.project_key)
+    )
+    mapping = result.scalar_one_or_none()
+    if not mapping:
+        raise HTTPException(status_code=404, detail="Repo mapping not found")
+
+    try:
+        run = await retry_deployment(
+            db,
+            run,
+            session,
+            mapping,
+            body.target if body else None,
+        )
+    except PipelineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await _run_response(run, session, db)
 
 
 @router.post("/{run_id}/decline-pr", response_model=DeliveryRunResponse)
@@ -381,7 +535,7 @@ async def decline_pr_endpoint(
     except PipelineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _run_response(run, session)
+    return await _run_response(run, session, db)
 
 
 @router.post("/{run_id}/apply-revision", response_model=DeliveryRunResponse)
@@ -402,14 +556,14 @@ async def apply_revision_endpoint(
     except PipelineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return _run_response(run, session)
+    return await _run_response(run, session, db)
 
 
 @router.get("/{run_id}/file-diff", response_model=FileDiffResponse)
 async def get_run_file_diff_endpoint(
     run_id: uuid.UUID,
     path: str = Query(..., min_length=1),
-    _: dict = Depends(require_auth),
+    session: dict = Depends(require_auth),
     db: AsyncSession = Depends(get_db),
 ):
     run = await db.get(DeliveryRun, run_id)
@@ -417,7 +571,7 @@ async def get_run_file_diff_endpoint(
         raise HTTPException(status_code=404, detail="Run not found")
 
     try:
-        diff = await get_run_file_diff(db, run, path)
+        diff = await get_run_file_diff(db, run, session, path)
     except PipelineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

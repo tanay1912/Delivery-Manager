@@ -2,11 +2,15 @@ import httpx
 
 
 class JiraClient:
-    def __init__(self, site_url: str, email: str, api_token: str):
+    def __init__(self, site_url: str, email: str, api_token: str, cloud_id: str | None = None):
         self.site_url = site_url.rstrip("/")
         self.email = email
         self.api_token = api_token
-        self.base_url = f"{self.site_url}/rest/api/3"
+        self.cloud_id = cloud_id
+        if cloud_id:
+            self.base_url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3"
+        else:
+            self.base_url = f"{self.site_url}/rest/api/3"
 
     def _auth(self) -> tuple[str, str]:
         return (self.email, self.api_token)
@@ -89,6 +93,17 @@ class JiraClient:
             )
             response.raise_for_status()
             return response.json()
+
+    async def get_issue_comments(self, issue_key: str) -> list[dict]:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self.base_url}/issue/{issue_key}/comment",
+                params={"orderBy": "created", "maxResults": 100},
+                auth=self._auth(),
+                headers=self._headers(),
+            )
+            response.raise_for_status()
+            return response.json().get("comments", [])
 
     async def get_transitions(self, issue_key: str) -> list[dict]:
         async with httpx.AsyncClient() as client:
@@ -207,17 +222,93 @@ class JiraClient:
         return JiraClient._adf_to_text(description)
 
     @staticmethod
+    def normalize_comments(raw_comments: list[dict]) -> list[dict]:
+        normalized: list[dict] = []
+        for comment in raw_comments:
+            body = comment.get("body")
+            if body is None:
+                text = ""
+            elif isinstance(body, str):
+                text = body
+            else:
+                text = JiraClient._adf_to_text(body)
+            text = text.strip()
+            if not text:
+                continue
+            author = (comment.get("author") or {}).get("displayName", "Unknown")
+            normalized.append(
+                {
+                    "author": author,
+                    "created": comment.get("created", ""),
+                    "body": text,
+                }
+            )
+        return normalized
+
+    @staticmethod
+    def format_comments_for_ai(comments: list[dict], *, exclude_delivery_manager: bool = True) -> str:
+        lines: list[str] = []
+        for comment in comments:
+            body = str(comment.get("body") or "").strip()
+            if not body:
+                continue
+            if exclude_delivery_manager and body.startswith("[Delivery Manager]"):
+                continue
+            author = str(comment.get("author") or "Unknown").strip()
+            created = str(comment.get("created") or "").strip()
+            header = f"{author}"
+            if created:
+                header = f"{author} ({created})"
+            lines.append(f"{header}:\n{body}")
+        return "\n\n".join(lines)
+
+    @staticmethod
+    def build_ticket_context(description: str, comments: list[dict]) -> str:
+        parts: list[str] = []
+        if description.strip():
+            parts.append(description.strip())
+        comments_text = JiraClient.format_comments_for_ai(comments)
+        if comments_text:
+            parts.append(f"--- Jira comments ---\n{comments_text}")
+        return "\n\n".join(parts) if parts else "(no description or comments)"
+
+    @staticmethod
     def _adf_to_text(node: dict) -> str:
         if not isinstance(node, dict):
             return ""
-        if node.get("type") == "text":
-            return node.get("text", "")
-        parts = []
+        node_type = node.get("type")
+
+        if node_type == "text":
+            text = node.get("text", "")
+            for mark in node.get("marks") or []:
+                if mark.get("type") == "link":
+                    href = str((mark.get("attrs") or {}).get("href") or "").strip()
+                    if href:
+                        if not text or text == href:
+                            return href
+                        return f"[{text}]({href})"
+            return text
+
+        if node_type == "inlineCard":
+            return str((node.get("attrs") or {}).get("url") or "").strip()
+
+        if node_type == "hardBreak":
+            return "\n"
+
+        if node_type == "mention":
+            return str((node.get("attrs") or {}).get("text") or "@mention").strip()
+
+        parts: list[str] = []
         for child in node.get("content") or []:
             parts.append(JiraClient._adf_to_text(child))
-        if node.get("type") == "paragraph":
-            parts.append("\n")
-        return "".join(parts)
+        text = "".join(parts)
+
+        if node_type in {"paragraph", "heading", "listItem", "blockquote", "tableCell", "tableHeader"}:
+            text += "\n"
+        elif node_type == "rule":
+            text += "\n---\n"
+
+        return text
 
     @staticmethod
     def find_transition(

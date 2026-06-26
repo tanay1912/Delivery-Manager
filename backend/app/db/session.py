@@ -46,12 +46,97 @@ async def init_db() -> None:
         )
         await conn.execute(
             text(
+                "ALTER TABLE project_repo_mappings ADD COLUMN IF NOT EXISTS rules TEXT NOT NULL DEFAULT ''"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE project_repo_mappings ADD COLUMN IF NOT EXISTS skills TEXT NOT NULL DEFAULT ''"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE project_repo_mappings ADD COLUMN IF NOT EXISTS ssh_host VARCHAR(256) NOT NULL DEFAULT ''"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE project_repo_mappings ADD COLUMN IF NOT EXISTS ssh_port INTEGER NOT NULL DEFAULT 22"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE project_repo_mappings ADD COLUMN IF NOT EXISTS ssh_username VARCHAR(128) NOT NULL DEFAULT ''"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE project_repo_mappings ADD COLUMN IF NOT EXISTS ssh_password_encrypted TEXT NOT NULL DEFAULT ''"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE project_repo_mappings ADD COLUMN IF NOT EXISTS ssh_private_key_encrypted TEXT NOT NULL DEFAULT ''"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE project_repo_mappings ADD COLUMN IF NOT EXISTS ssh_auth_type VARCHAR(16) NOT NULL DEFAULT 'password'"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE project_repo_mappings ADD COLUMN IF NOT EXISTS ssh_use_sudo BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE project_repo_mappings ADD COLUMN IF NOT EXISTS project_root_directory VARCHAR(512) NOT NULL DEFAULT ''"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE project_repo_mappings ADD COLUMN IF NOT EXISTS post_pr_merge_command TEXT NOT NULL DEFAULT ''"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE project_repo_mappings ADD COLUMN IF NOT EXISTS beta_post_pr_merge_command TEXT NOT NULL DEFAULT ''"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE project_repo_mappings ADD COLUMN IF NOT EXISTS master_post_pr_merge_command TEXT NOT NULL DEFAULT ''"
+            )
+        )
+        await conn.execute(
+            text(
                 """
                 UPDATE project_repo_mappings
                 SET master_branch = COALESCE(NULLIF(master_branch, ''), 'master'),
                     beta_branch = COALESCE(NULLIF(beta_branch, ''), 'beta'),
                     beta_website_url = COALESCE(beta_website_url, ''),
-                    master_website_url = COALESCE(master_website_url, '')
+                    master_website_url = COALESCE(master_website_url, ''),
+                    rules = COALESCE(rules, ''),
+                    skills = COALESCE(skills, ''),
+                    ssh_host = COALESCE(ssh_host, ''),
+                    ssh_port = COALESCE(ssh_port, 22),
+                    ssh_username = COALESCE(ssh_username, ''),
+                    ssh_password_encrypted = COALESCE(ssh_password_encrypted, ''),
+                    ssh_private_key_encrypted = COALESCE(ssh_private_key_encrypted, ''),
+                    ssh_auth_type = COALESCE(NULLIF(ssh_auth_type, ''), 'password'),
+                    project_root_directory = COALESCE(project_root_directory, ''),
+                    post_pr_merge_command = COALESCE(post_pr_merge_command, ''),
+                    beta_post_pr_merge_command = COALESCE(
+                        NULLIF(beta_post_pr_merge_command, ''),
+                        post_pr_merge_command,
+                        ''
+                    ),
+                    master_post_pr_merge_command = COALESCE(
+                        NULLIF(master_post_pr_merge_command, ''),
+                        post_pr_merge_command,
+                        ''
+                    )
                 """
             )
         )
@@ -72,6 +157,19 @@ async def init_db() -> None:
                     END IF;
                 END $$;
                 """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_user_credentials_account_site
+                ON user_credentials (atlassian_account_id, site_host)
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE user_credentials ADD COLUMN IF NOT EXISTS jira_cloud_id VARCHAR(128)"
             )
         )
 

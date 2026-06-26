@@ -9,6 +9,53 @@ export interface MeResponse {
   user: User;
   site_name: string;
   site_url: string;
+  bitbucket_configured?: boolean;
+  bitbucket_username?: string | null;
+  openai_configured?: boolean;
+  openai_model?: string | null;
+  cursor_configured?: boolean;
+  cursor_model?: string | null;
+}
+
+export interface ModelOption {
+  id: string;
+  label: string;
+}
+
+export interface ModelsListResponse {
+  models: ModelOption[];
+  source: "api" | "fallback";
+}
+
+export interface BitbucketStatus {
+  configured: boolean;
+  username?: string | null;
+  display_name?: string | null;
+}
+
+export interface BitbucketConnectRequest {
+  username: string;
+  app_password: string;
+}
+
+export interface OpenAIStatus {
+  configured: boolean;
+  model: string;
+}
+
+export interface CursorStatus {
+  configured: boolean;
+  model: string;
+}
+
+export interface OpenAIConnectRequest {
+  api_key: string;
+  model: string;
+}
+
+export interface CursorConnectRequest {
+  api_key: string;
+  model: string;
 }
 
 export interface ConnectRequest {
@@ -70,6 +117,20 @@ export interface Mapping {
   beta_branch: string;
   beta_website_url: string;
   master_website_url: string;
+  rules: string;
+  skills: string;
+  ssh_host: string;
+  ssh_port: number;
+  ssh_username: string;
+  ssh_password_configured: boolean;
+  ssh_private_key_configured: boolean;
+  ssh_auth_type: "password" | "pem";
+  ssh_use_sudo: boolean;
+  project_root_directory: string;
+  beta_post_pr_merge_commands: string;
+  master_post_pr_merge_commands: string;
+  beta_post_merge_shell_preview: string;
+  master_post_merge_shell_preview: string;
   created_at: string;
   updated_at: string;
 }
@@ -82,6 +143,18 @@ export interface MappingInput {
   beta_branch: string;
   beta_website_url: string;
   master_website_url: string;
+  rules: string;
+  skills: string;
+  ssh_host: string;
+  ssh_port: number;
+  ssh_username: string;
+  ssh_password?: string;
+  ssh_private_key?: string;
+  ssh_auth_type: "password" | "pem";
+  ssh_use_sudo: boolean;
+  project_root_directory: string;
+  beta_post_pr_merge_commands: string;
+  master_post_pr_merge_commands: string;
 }
 
 export interface MappingsResponse {
@@ -106,6 +179,12 @@ export interface ChangedFile {
   action: string;
 }
 
+export interface JiraComment {
+  author: string;
+  created: string;
+  body: string;
+}
+
 export interface FileDiff {
   path: string;
   action: string;
@@ -123,6 +202,27 @@ export interface WebsiteVerification {
   summary: string;
   findings: string[];
   screenshot_filename?: string | null;
+}
+
+export interface DeploymentCommand {
+  index: number;
+  command: string;
+  status: string;
+  output: string;
+  at: string;
+}
+
+export interface DeploymentAttempt {
+  id: string;
+  environment: string;
+  environment_label: string;
+  trigger: string;
+  status: string;
+  started_at: string;
+  completed_at: string | null;
+  commands: DeploymentCommand[];
+  output: string | null;
+  error: string | null;
 }
 
 export interface DeliveryRun {
@@ -146,6 +246,9 @@ export interface DeliveryRun {
   draft_question: string | null;
   needs_clarification: boolean;
   estimation_prepared: boolean;
+  description: string | null;
+  jira_comments: JiraComment[];
+  jira_synced_at: string | null;
   changed_files: ChangedFile[];
   changed_files_refreshed_at: string | null;
   branch_name: string | null;
@@ -157,6 +260,11 @@ export interface DeliveryRun {
   master_pr_id: number | null;
   beta_merged: boolean;
   master_merged: boolean;
+  unified_deploy_target: boolean;
+  pending_deploy_retry: string | null;
+  staging_deploy_commands: string[];
+  live_deploy_commands: string[];
+  deployment_history: DeploymentAttempt[];
   verifications: WebsiteVerification[];
   error_message: string | null;
   workflow_notice: string | null;
@@ -220,6 +328,54 @@ export const api = {
       body: JSON.stringify(body),
     }),
   getMe: () => request<MeResponse>("/api/auth/me"),
+  resume: () =>
+    request<MeResponse & { ok: boolean }>("/api/auth/resume", {
+      method: "POST",
+    }),
+  ensureAuth: async (): Promise<MeResponse> => {
+    try {
+      return await request<MeResponse>("/api/auth/me");
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        return await request<MeResponse & { ok: boolean }>("/api/auth/resume", {
+          method: "POST",
+        });
+      }
+      throw err;
+    }
+  },
+  getBitbucketStatus: () => request<BitbucketStatus>("/api/auth/bitbucket"),
+  connectBitbucket: (body: BitbucketConnectRequest) =>
+    request<BitbucketStatus & { ok: boolean }>("/api/auth/bitbucket", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  disconnectBitbucket: () =>
+    request<{ ok: boolean; configured: boolean }>("/api/auth/bitbucket", { method: "DELETE" }),
+  getOpenAIStatus: () => request<OpenAIStatus>("/api/auth/openai"),
+  connectOpenAI: (body: OpenAIConnectRequest) =>
+    request<OpenAIStatus & { ok: boolean }>("/api/auth/openai", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  disconnectOpenAI: () =>
+    request<{ ok: boolean; configured: boolean }>("/api/auth/openai", { method: "DELETE" }),
+  getOpenAIModels: (apiKey?: string) => {
+    const params = apiKey?.trim() ? `?api_key=${encodeURIComponent(apiKey.trim())}` : "";
+    return request<ModelsListResponse>(`/api/auth/openai/models${params}`);
+  },
+  getCursorStatus: () => request<CursorStatus>("/api/auth/cursor"),
+  connectCursor: (body: CursorConnectRequest) =>
+    request<CursorStatus & { ok: boolean }>("/api/auth/cursor", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  disconnectCursor: () =>
+    request<{ ok: boolean; configured: boolean }>("/api/auth/cursor", { method: "DELETE" }),
+  getCursorModels: (apiKey?: string) => {
+    const params = apiKey?.trim() ? `?api_key=${encodeURIComponent(apiKey.trim())}` : "";
+    return request<ModelsListResponse>(`/api/auth/cursor/models${params}`);
+  },
   logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
   getProjects: (startAt = 0, maxResults = 100, query?: string) => {
     const params = new URLSearchParams({
@@ -274,6 +430,8 @@ export const api = {
   getRunByIssue: (issueKey: string) =>
     request<DeliveryRun>(`/api/runs/by-issue/${encodeURIComponent(issueKey)}`),
   getRun: (id: string) => request<DeliveryRun>(`/api/runs/${id}`),
+  reloadJira: (id: string) =>
+    request<DeliveryRun>(`/api/runs/${id}/reload-jira`, { method: "POST" }),
   prepareEstimation: (id: string) =>
     request<DeliveryRun>(`/api/runs/${id}/prepare-estimation`, { method: "POST" }),
   postEstimation: (id: string, comment: string, hours: number) =>
@@ -294,6 +452,11 @@ export const api = {
     request<DeliveryRun>(`/api/runs/${id}/merge/beta`, { method: "POST" }),
   mergeMasterRun: (id: string) =>
     request<DeliveryRun>(`/api/runs/${id}/merge/master`, { method: "POST" }),
+  retryDeploymentRun: (id: string, target?: "beta" | "master") =>
+    request<DeliveryRun>(`/api/runs/${id}/retry-deployment`, {
+      method: "POST",
+      body: JSON.stringify(target ? { target } : {}),
+    }),
   applyRevision: (id: string, prompt: string) =>
     request<DeliveryRun>(`/api/runs/${id}/apply-revision`, {
       method: "POST",

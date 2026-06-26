@@ -84,12 +84,6 @@ cd frontend && npm install && npm run dev
 | `DATABASE_URL` | Postgres URL (default in Docker: `postgresql+asyncpg://deliverymanager:deliverymanager@postgres:5432/deliverymanager`) |
 | `FRONTEND_URL` | Frontend origin (default: `http://localhost:3000`; use `http://localhost:5173` when running Vite dev) |
 | `CORS_ORIGINS` | Comma-separated allowed origins (default: `http://localhost:3000`; add `http://localhost:5173` for Vite dev if not using the proxy) |
-| `OPENAI_API_KEY` | OpenAI API key for ticket estimation and code generation |
-| `OPENAI_MODEL` | OpenAI model (default: `gpt-4o-mini`) |
-| `CURSOR_API_KEY` | Cursor API key for cloud agent development ([Dashboard → Integrations](https://cursor.com/dashboard/integrations)). When set, the pipeline uses Cursor SDK instead of OpenAI for code generation. |
-| `CURSOR_MODEL` | Cursor agent model (default: `composer-2.5`) |
-| `BITBUCKET_USERNAME` | Bitbucket username for PR creation |
-| `BITBUCKET_APP_PASSWORD` | Bitbucket app password with repository write access |
 | `JIRA_WRITEBACK_ENABLED` | Post PR link comments to Jira (default: `true`) |
 | `JIRA_IMPACT_ANALYSIS_FIELD` | Jira custom field id for Impact Analysis (optional; auto-discovered by name if unset) |
 
@@ -138,14 +132,16 @@ Click **Deliver** on a ticket to open the delivery workflow page (`/deliver/{iss
 ### Step 2 — Implementation
 
 - Click **Start implementation** — status moves to **In Progress**
-- Creates a feature branch, runs **Cursor Cloud Agent** development (or OpenAI fallback if `CURSOR_API_KEY` is unset), commits, and opens Bitbucket PRs
+- Creates a feature branch (named with the Jira issue key, e.g. `feature/PROJ-123-summary`), runs **Cursor Cloud Agent** development (or OpenAI fallback if Cursor is not configured in Settings), commits, and opens Bitbucket PRs
 
 ### Step 3 — Pull request
 
 - Review the PR link and changed files list
 - **Approve & Merge** when ready
 
-Configure `OPENAI_API_KEY`, `BITBUCKET_USERNAME`, and `BITBUCKET_APP_PASSWORD` in `.env`, and add a project mapping before running. For Cursor-based development, also set `CURSOR_API_KEY` from [cursor.com/dashboard/integrations](https://cursor.com/dashboard/integrations) — the Cursor account must have access to the mapped Bitbucket repos.
+Configure OpenAI, Cursor, and Bitbucket credentials in **Settings**, and add a project mapping before running.
+
+For Bitbucket, use your **Atlassian account email** and a **Bitbucket API token** (not an app password). Create the token at [id.atlassian.com](https://id.atlassian.com/manage-profile/security/api-tokens) with repository read and write scopes.
 
 ## Architecture
 
@@ -170,6 +166,7 @@ OAuth 3LO apps require a site admin to authorize the app on many company Jira si
 | Issue | Fix |
 |-------|-----|
 | Invalid credentials on connect | Check site URL, email, and API token; token must belong to the same email |
+| Bitbucket 401 during delivery | Reconnect Bitbucket in Settings using your Atlassian email and a Bitbucket API token (app passwords no longer work for repository APIs) |
 | 401 on dashboard | Session expired — connect again |
 | Empty projects/tickets | Confirm your account has Jira access on that site |
 | Company site blocked OAuth before | API tokens bypass OAuth app approval — use your work email + token |

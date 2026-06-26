@@ -5,8 +5,8 @@ from urllib.parse import quote
 class BitbucketClient:
     BASE_URL = "https://api.bitbucket.org/2.0"
 
-    def __init__(self, username: str, app_password: str):
-        self.auth = (username, app_password)
+    def __init__(self, email: str, api_token: str):
+        self.auth = (email, api_token)
 
     @staticmethod
     def _looks_like_commit(ref: str) -> bool:
@@ -89,20 +89,21 @@ class BitbucketClient:
         parent_commit: str | None = None,
     ) -> dict:
         url = f"{self.BASE_URL}/repositories/{workspace}/{repo_slug}/src"
-        form: list[tuple[str, str]] = [
-            ("message", message),
-            ("branch", branch),
+        # Use files= (not data=) so httpx builds multipart correctly on AsyncClient.
+        multipart: list[tuple[str, tuple[str | None, str]]] = [
+            ("message", (None, message)),
+            ("branch", (None, branch)),
         ]
         if parent_commit:
-            form.append(("parents", parent_commit))
+            multipart.append(("parents", (None, parent_commit)))
         for path in deleted_paths or []:
             normalized = path if path.startswith("/") else f"/{path.lstrip('/')}"
-            form.append(("files", normalized))
+            multipart.append(("files", (None, normalized)))
         for file_path, content in (files or {}).items():
-            form.append((file_path, content))
+            multipart.append((file_path, (None, content)))
 
         async with httpx.AsyncClient() as client:
-            response = await client.post(url, auth=self.auth, data=form, timeout=60.0)
+            response = await client.post(url, auth=self.auth, files=multipart, timeout=60.0)
             response.raise_for_status()
             return response.json() if response.content else {}
 
@@ -134,6 +135,68 @@ class BitbucketClient:
             response.raise_for_status()
             return response.json()
 
+    _CONFLICT_DIFFSTAT_STATUSES = frozenset(
+        {
+            "merge conflict",
+            "rename conflict",
+            "rename/delete conflict",
+            "subrepo conflict",
+            "local deleted",
+            "remote deleted",
+        }
+    )
+
+    @staticmethod
+    def is_pull_request_merged(pr: dict | None) -> bool:
+        if not pr:
+            return False
+        return BitbucketClient.pull_request_state(pr) == "MERGED"
+
+    @staticmethod
+    def http_error_detail(exc: Exception) -> str:
+        if isinstance(exc, httpx.HTTPStatusError):
+            from app.auth.bitbucket_credentials import parse_bitbucket_auth_error
+
+            deprecated = parse_bitbucket_auth_error(exc.response)
+            if deprecated:
+                return deprecated
+            try:
+                body = exc.response.json()
+                if isinstance(body, dict):
+                    error = body.get("error") or {}
+                    if isinstance(error, dict):
+                        message = error.get("message") or error.get("detail")
+                        if message:
+                            return str(message)
+            except Exception:
+                pass
+            text = exc.response.text.strip()
+            if text:
+                return text[:500]
+            return f"HTTP {exc.response.status_code}"
+        return str(exc) or "Unknown error"
+
+    async def pull_request_has_merge_conflicts(
+        self, workspace: str, repo_slug: str, pr_id: int
+    ) -> bool:
+        url = (
+            f"{self.BASE_URL}/repositories/{workspace}/{repo_slug}"
+            f"/pullrequests/{pr_id}/diffstat"
+        )
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            while url:
+                response = await client.get(url, auth=self.auth, timeout=60.0)
+                if response.status_code == 404:
+                    return False
+                response.raise_for_status()
+                data = response.json()
+                for item in data.get("values", []):
+                    status = str(item.get("status", "")).lower().strip()
+                    if status in self._CONFLICT_DIFFSTAT_STATUSES or "conflict" in status:
+                        return True
+                url = data.get("next") or ""
+        return False
+
     async def merge_pull_request(self, workspace: str, repo_slug: str, pr_id: int) -> dict:
         url = f"{self.BASE_URL}/repositories/{workspace}/{repo_slug}/pullrequests/{pr_id}/merge"
         async with httpx.AsyncClient() as client:
@@ -161,6 +224,26 @@ class BitbucketClient:
         except Exception:
             return None
 
+    async def list_open_pull_requests_for_branch(
+        self, workspace: str, repo_slug: str, branch_name: str
+    ) -> list[dict]:
+        """Return open pull requests whose source branch matches branch_name."""
+        q = f'source.branch.name="{branch_name}" AND state="OPEN"'
+        url = f"{self.BASE_URL}/repositories/{workspace}/{repo_slug}/pullrequests"
+        params: dict[str, str | int] = {"q": q, "pagelen": 50}
+        results: list[dict] = []
+        async with httpx.AsyncClient() as client:
+            while url:
+                response = await client.get(url, auth=self.auth, params=params, timeout=30.0)
+                if response.status_code == 404:
+                    return results
+                response.raise_for_status()
+                data = response.json()
+                results.extend(data.get("values", []))
+                url = data.get("next") or ""
+                params = {}
+        return results
+
     @staticmethod
     def pull_request_state(pr: dict) -> str:
         return str(pr.get("state", "")).upper().strip()
@@ -168,6 +251,13 @@ class BitbucketClient:
     @staticmethod
     def is_pull_request_open(pr: dict) -> bool:
         return BitbucketClient.pull_request_state(pr) == "OPEN"
+
+    @staticmethod
+    def is_pull_request_inactive(pr: dict | None) -> bool:
+        """True when the PR is missing or no longer open (declined, merged, superseded, etc.)."""
+        if not pr:
+            return True
+        return not BitbucketClient.is_pull_request_open(pr)
 
     async def decline_pull_request(
         self,

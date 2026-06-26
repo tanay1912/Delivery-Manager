@@ -1,4 +1,4 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, ApiError } from "../api/client";
 
@@ -9,6 +9,15 @@ export default function Login() {
   const [apiToken, setApiToken] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [checkingSession, setCheckingSession] = useState(true);
+
+  useEffect(() => {
+    api
+      .ensureAuth()
+      .then(() => navigate("/dashboard", { replace: true }))
+      .catch(() => {})
+      .finally(() => setCheckingSession(false));
+  }, [navigate]);
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
@@ -28,12 +37,20 @@ export default function Login() {
     }
   };
 
+  if (checkingSession) {
+    return (
+      <div className="min-h-screen flex items-center justify-center px-4 py-12">
+        <div className="text-sm text-slate-500">Restoring your session…</div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen flex items-center justify-center px-4 py-12">
       <div className="w-full max-w-md">
         <div className="card shadow-panel p-8 sm:p-10">
           <div className="text-center mb-8">
-            <div className="inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-brand-500 to-brand-700 text-white shadow-md mb-5">
+            <div className="inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-brand-500 to-brand-700 text-white shadow-brand-md mb-5">
               <svg className="h-7 w-7" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                 <path
                   d="M12 3L4 8v8l8 5 8-5V8l-8-5z"
@@ -116,7 +133,7 @@ export default function Login() {
             >
               id.atlassian.com
             </a>
-            . Your token is encrypted and stored only for your session.
+            . Your credentials are encrypted and saved until you log out.
           </p>
         </div>
       </div>

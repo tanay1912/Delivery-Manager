@@ -6,9 +6,30 @@ from pydantic import BaseModel, Field
 from app.services.delivery_pipeline import (
     IMPLEMENTATION_STEPS,
     PHASE_LABELS,
+    _hydrate_merge_flags_from_steps,
     get_workflow_phase,
+    is_unified_deploy_target,
     resolve_draft_comment,
 )
+
+
+def _infer_pending_deploy_retry(run, ctx: dict) -> str | None:
+    ctx = dict(ctx)
+    _hydrate_merge_flags_from_steps(run, ctx)
+    pending = ctx.get("pending_deploy_retry")
+    if pending in ("beta", "master"):
+        return pending
+    if not (ctx.get("beta_merged") or ctx.get("master_merged")):
+        return None
+    for deploy_step, target in (("deploy_master", "master"), ("deploy_beta", "beta")):
+        entries = [
+            entry
+            for entry in (run.steps_log or [])
+            if isinstance(entry, dict) and entry.get("step") == deploy_step
+        ]
+        if entries and entries[-1].get("status") == "failed":
+            return target
+    return None
 
 
 class RunStepLog(BaseModel):
@@ -29,6 +50,12 @@ class ChangedFileInfo(BaseModel):
     action: str = "modify"
 
 
+class JiraCommentInfo(BaseModel):
+    author: str
+    created: str
+    body: str
+
+
 class FileDiffResponse(BaseModel):
     path: str
     action: str
@@ -46,6 +73,27 @@ class WebsiteVerificationInfo(BaseModel):
     summary: str
     findings: list[str] = []
     screenshot_filename: str | None = None
+
+
+class DeploymentCommandInfo(BaseModel):
+    index: int
+    command: str
+    status: str
+    output: str = ""
+    at: str = ""
+
+
+class DeploymentAttemptInfo(BaseModel):
+    id: str
+    environment: str
+    environment_label: str
+    trigger: str
+    status: str
+    started_at: str
+    completed_at: str | None = None
+    commands: list[DeploymentCommandInfo] = []
+    output: str | None = None
+    error: str | None = None
 
 
 class DeliveryRunResponse(BaseModel):
@@ -69,6 +117,9 @@ class DeliveryRunResponse(BaseModel):
     draft_question: str | None
     needs_clarification: bool
     estimation_prepared: bool
+    description: str | None = None
+    jira_comments: list[JiraCommentInfo] = []
+    jira_synced_at: str | None = None
     changed_files: list[ChangedFileInfo]
     changed_files_refreshed_at: str | None = None
     branch_name: str | None
@@ -80,6 +131,11 @@ class DeliveryRunResponse(BaseModel):
     master_pr_id: int | None = None
     beta_merged: bool = False
     master_merged: bool = False
+    unified_deploy_target: bool = False
+    pending_deploy_retry: str | None = None
+    staging_deploy_commands: list[str] = []
+    live_deploy_commands: list[str] = []
+    deployment_history: list[DeploymentAttemptInfo] = []
     verifications: list[WebsiteVerificationInfo] = []
     error_message: str | None
     workflow_notice: str | None = None
@@ -98,9 +154,18 @@ def _jira_urls(site_url: str | None, issue_key: str) -> tuple[str | None, str | 
     return base, f"{base}?devStatusDetailDialog=branch"
 
 
-def run_to_response(run, site_url: str | None = None) -> DeliveryRunResponse:
-    ctx = run.context_data or {}
+def run_to_response(
+    run,
+    site_url: str | None = None,
+    *,
+    staging_deploy_commands: list[str] | None = None,
+    live_deploy_commands: list[str] | None = None,
+) -> DeliveryRunResponse:
+    ctx = dict(run.context_data or {})
+    _hydrate_merge_flags_from_steps(run, ctx)
     phase = get_workflow_phase(run)
+    if ctx.get("beta_merged") or ctx.get("master_merged") or ctx.get("pending_deploy_retry"):
+        phase = "pr_review"
 
     step_status: dict[str, str] = {}
     for entry in run.steps_log or []:
@@ -157,7 +222,53 @@ def run_to_response(run, site_url: str | None = None) -> DeliveryRunResponse:
         if isinstance(v, dict)
     ]
 
+    jira_comments = [
+        JiraCommentInfo(
+            author=str(c.get("author", "Unknown")),
+            created=str(c.get("created", "")),
+            body=str(c.get("body", "")),
+        )
+        for c in (ctx.get("jira_comments") or [])
+        if isinstance(c, dict) and str(c.get("body") or "").strip()
+    ]
+
     issue_url, development_url = _jira_urls(site_url, run.jira_issue_key)
+
+    pending_deploy_retry = _infer_pending_deploy_retry(run, ctx)
+    status = run.status
+    if (
+        status == "failed"
+        and pending_deploy_retry
+        and (ctx.get("beta_merged") or ctx.get("master_merged"))
+    ):
+        status = "awaiting_approval"
+
+    deployment_history = [
+        DeploymentAttemptInfo(
+            id=str(item.get("id", "")),
+            environment=str(item.get("environment", "")),
+            environment_label=str(item.get("environment_label", "")),
+            trigger=str(item.get("trigger", "")),
+            status=str(item.get("status", "")),
+            started_at=str(item.get("started_at", "")),
+            completed_at=item.get("completed_at"),
+            commands=[
+                DeploymentCommandInfo(
+                    index=int(cmd.get("index", 0)),
+                    command=str(cmd.get("command", "")),
+                    status=str(cmd.get("status", "")),
+                    output=str(cmd.get("output", "")),
+                    at=str(cmd.get("at", "")),
+                )
+                for cmd in (item.get("commands") or [])
+                if isinstance(cmd, dict)
+            ],
+            output=item.get("output"),
+            error=item.get("error"),
+        )
+        for item in (ctx.get("deployment_history") or [])
+        if isinstance(item, dict)
+    ]
 
     return DeliveryRunResponse(
         id=run.id,
@@ -165,7 +276,7 @@ def run_to_response(run, site_url: str | None = None) -> DeliveryRunResponse:
         jira_issue_id=run.jira_issue_id,
         project_key=run.project_key,
         summary=run.summary,
-        status=run.status,
+        status=status,
         workflow_phase=phase,
         workflow_phase_label=PHASE_LABELS.get(phase, phase.replace("_", " ").title()),
         jira_status=ctx.get("status_name"),
@@ -180,6 +291,9 @@ def run_to_response(run, site_url: str | None = None) -> DeliveryRunResponse:
         draft_question=ctx.get("draft_question"),
         needs_clarification=bool(ctx.get("needs_clarification")),
         estimation_prepared=bool(ctx.get("estimation_prepared")),
+        description=ctx.get("description") or None,
+        jira_comments=jira_comments,
+        jira_synced_at=ctx.get("jira_synced_at"),
         changed_files=changed_files,
         changed_files_refreshed_at=ctx.get("changed_files_refreshed_at"),
         branch_name=run.branch_name,
@@ -191,6 +305,11 @@ def run_to_response(run, site_url: str | None = None) -> DeliveryRunResponse:
         master_pr_id=ctx.get("master_pr_id"),
         beta_merged=bool(ctx.get("beta_merged")),
         master_merged=bool(ctx.get("master_merged")),
+        unified_deploy_target=is_unified_deploy_target(ctx.get("mapping") or {}),
+        pending_deploy_retry=pending_deploy_retry,
+        staging_deploy_commands=staging_deploy_commands or [],
+        live_deploy_commands=live_deploy_commands or [],
+        deployment_history=deployment_history,
         verifications=verifications,
         error_message=run.error_message,
         workflow_notice=ctx.get("workflow_notice"),
@@ -220,6 +339,10 @@ class ApplyRevisionRequest(BaseModel):
 
 class DeclinePrRequest(BaseModel):
     reason: str = Field(default="", max_length=4000)
+
+
+class RetryDeploymentRequest(BaseModel):
+    target: str | None = Field(default=None, pattern="^(beta|master)$")
 
 
 class RunListResponse(BaseModel):
