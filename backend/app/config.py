@@ -12,6 +12,8 @@ class Settings(BaseSettings):
 
     jira_writeback_enabled: bool = True
     jira_impact_analysis_field: str = ""
+    jira_unit_testing_field: str = ""
+    jira_admin_database_field: str = ""
 
     @property
     def cors_origin_list(self) -> list[str]:

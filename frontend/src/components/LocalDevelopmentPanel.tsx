@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { DeliveryRun } from "../api/client";
+import { getRevisionHistoryEntries } from "../utils/deliverySteps";
 import ChangedFilesSection from "./ChangedFilesSection";
 import FileDiffViewer from "./FileDiffViewer";
 
@@ -36,7 +37,7 @@ export default function LocalDevelopmentPanel({
 }: LocalDevelopmentPanelProps) {
   const [selectedFile, setSelectedFile] = useState<{ path: string; action: string } | null>(null);
   const hasChangedFiles = run.changed_files.length > 0;
-  const revisionHistory = run.steps_log.filter((entry) => entry.step === "code_revision");
+  const revisionHistory = getRevisionHistoryEntries(run.steps_log);
   const actionDisabled = disabled || creatingPrs || applyingRevision;
   const prsCreated = stepCompleted(run.steps_log, "confirm_local_changes");
   const showCreatePrs = hasChangedFiles && !prsCreated;

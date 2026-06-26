@@ -40,7 +40,7 @@ export default function Layout({ user, siteName, onLogout, children, showSidebar
   const sidebarVisible = showSidebar && user && location.pathname !== "/login";
 
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className="min-h-screen flex flex-col lg:h-screen lg:overflow-hidden">
       <header className="sticky top-0 z-40 border-b border-slate-700/50 bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 shadow-lg shadow-slate-900/20">
         <div className="w-full px-4 sm:px-6 h-14 flex items-center justify-between">
           <Link to="/dashboard" className="flex items-center gap-3 group">
@@ -58,11 +58,11 @@ export default function Layout({ user, siteName, onLogout, children, showSidebar
         </div>
       </header>
 
-      <div className="flex flex-1 min-h-0 flex-col">
+      <div className="flex flex-1 flex-col lg:min-h-0">
         {sidebarVisible && <MobileNav />}
-        <div className="flex flex-1 min-h-0">
+        <div className="flex flex-1 lg:min-h-0">
           {sidebarVisible && <AppSidebar />}
-          <main className="flex-1 min-w-0 flex flex-col min-h-0">{children}</main>
+          <main className="flex-1 min-w-0 flex flex-col lg:min-h-0">{children}</main>
         </div>
       </div>
     </div>

@@ -188,6 +188,30 @@ async def init_db() -> None:
                 "ALTER TABLE user_credentials ADD COLUMN IF NOT EXISTS bitbucket_git_password_encrypted TEXT"
             )
         )
+        await conn.execute(
+            text(
+                "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS jira_admin_database_field VARCHAR(64) NOT NULL DEFAULT ''"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS jira_fields_cache JSONB NOT NULL DEFAULT '[]'::jsonb"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS jira_fields_cached_at TIMESTAMPTZ"
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                INSERT INTO app_settings (id, jira_impact_analysis_field, jira_unit_testing_field)
+                VALUES (1, '', '')
+                ON CONFLICT (id) DO NOTHING
+                """
+            )
+        )
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

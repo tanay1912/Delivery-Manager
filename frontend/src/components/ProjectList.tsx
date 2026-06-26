@@ -95,7 +95,7 @@ export default function ProjectList({
             value={search}
             onChange={(e) => handleSearchChange(e.target.value)}
             placeholder="Search projects..."
-            className="block w-full rounded-xl border border-slate-200/80 bg-white pl-10 pr-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 shadow-sm transition-colors focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="block w-full rounded-xl border border-slate-200/80 bg-white pl-10 pr-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 shadow-sm transition-colors focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500"
           />
         </div>
       </div>
@@ -105,7 +105,7 @@ export default function ProjectList({
           onClick={() => onSelect(null)}
           className={`w-full text-left px-3 py-2.5 rounded-xl text-sm font-medium transition-all mb-1 ${
             selectedKey === null
-              ? "bg-blue-50/80 text-blue-700 ring-1 ring-blue-200/40 border-l-[3px] border-blue-600"
+              ? "bg-brand-50/80 text-brand-700 ring-1 ring-brand-200/40 border-l-[3px] border-brand-600"
               : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
           }`}
         >
@@ -119,7 +119,7 @@ export default function ProjectList({
               <div
                 className={`flex items-center gap-1 rounded-xl transition-all ${
                   isSelected
-                    ? "bg-blue-50/80 ring-1 ring-blue-200/40 border-l-[3px] border-blue-600"
+                    ? "bg-brand-50/80 ring-1 ring-brand-200/40 border-l-[3px] border-brand-600"
                     : "hover:bg-slate-50"
                 }`}
               >
@@ -128,7 +128,7 @@ export default function ProjectList({
                   onClick={() => onSelect(project.key)}
                   className={`flex-1 min-w-0 text-left px-3 py-2.5 text-sm transition-all flex items-center gap-2.5 ${
                     isSelected
-                      ? "text-blue-700 font-medium"
+                      ? "text-brand-700 font-medium"
                       : "text-slate-600 hover:text-slate-900"
                   }`}
                 >
@@ -145,7 +145,7 @@ export default function ProjectList({
                   )}
                   <span className="truncate min-w-0">
                     <span className="font-mono text-[11px] text-slate-400 mr-1.5">{project.key}</span>
-                    <span className={isSelected ? "text-blue-800" : ""}>
+                    <span className={isSelected ? "text-brand-800" : ""}>
                       {project.name}
                     </span>
                   </span>
@@ -153,7 +153,7 @@ export default function ProjectList({
                 {showMappingSettings && (
                   <Link
                     to={`/admin/mappings?project=${encodeURIComponent(project.key)}`}
-                    className="flex-shrink-0 p-2 mr-0.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                    className="flex-shrink-0 p-2 mr-0.5 rounded-lg text-slate-400 hover:text-brand-600 hover:bg-brand-50 transition-colors"
                     title="Edit mapping"
                     aria-label={`Edit mapping for ${project.key}`}
                     onClick={(e) => e.stopPropagation()}
@@ -170,7 +170,7 @@ export default function ProjectList({
           <div className="px-3 py-6 text-sm text-slate-500 text-center space-y-3">
             <p>{emptyMessage ?? (search.trim() ? "No projects match your search." : "No projects found.")}</p>
             {configureHref && !search.trim() && (
-              <Link to={configureHref} className="inline-flex text-blue-600 hover:text-blue-700 font-medium">
+              <Link to={configureHref} className="inline-flex text-brand-600 hover:text-brand-700 font-medium">
                 Open setup guide
               </Link>
             )}

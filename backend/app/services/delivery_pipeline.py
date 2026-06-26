@@ -1,7 +1,9 @@
 import asyncio
 import difflib
+import re
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal
 
 import httpx
@@ -28,11 +30,17 @@ from app.clients.jira_client import JiraClient
 from app.clients.openai_client import OpenAIClient, slugify
 from app.config import settings
 from app.db.models import DeliveryRun, ProjectRepoMapping
+from app.services.app_settings import (
+    jira_admin_database_field_id,
+    jira_impact_analysis_field_id,
+    jira_unit_testing_field_id,
+)
 from app.services.deploy_commands import (
     commands_need_bitbucket_auth,
     deploy_commands_for_environment,
     fetch_deploy_commands_from_db,
 )
+from app.services.jira_fields import build_select_field_payload, filter_settable_transition_fields
 from app.services.repo_stack import probe_repository_stack
 from app.services.ssh_deploy import (
     DeployError,
@@ -40,6 +48,10 @@ from app.services.ssh_deploy import (
     run_environment_deploy,
 )
 from app.services.website_verifier import verify_website
+
+_RUN_DATA_ROOT = Path(__file__).resolve().parents[2] / "data" / "runs"
+
+MergeTarget = Literal["beta", "master"]
 
 WORKFLOW_PHASES: list[tuple[str, str]] = [
     ("estimation", "Estimation"),
@@ -311,6 +323,26 @@ _IN_ESTIMATION_KEYWORD_SETS: tuple[tuple[str, ...], ...] = (
 )
 _IN_ESTIMATION_EXCLUDE: tuple[str, ...] = ("complete", "completed", "done")
 
+_IN_PROGRESS_EXACT_NAMES: tuple[str, ...] = (
+    "In Progress",
+    "Start Progress",
+    "Begin Progress",
+)
+_IN_PROGRESS_KEYWORD_SETS: tuple[tuple[str, ...], ...] = (
+    ("in", "progress"),
+    ("start", "progress"),
+    ("start", "work"),
+    ("begin", "work"),
+)
+_IN_PROGRESS_EXCLUDE: tuple[str, ...] = (
+    "review",
+    "complete",
+    "completed",
+    "done",
+    "testing",
+    "estimation",
+)
+
 _ESTIMATION_COMPLETE_EXACT_NAMES: tuple[str, ...] = (
     "Estimation Complete",
     "Estimation Completed",
@@ -321,10 +353,27 @@ _ESTIMATION_COMPLETE_KEYWORD_SETS: tuple[tuple[str, ...], ...] = (
     ("complete", "estimation"),
 )
 
-_IN_TESTING_EXACT_NAMES: tuple[str, ...] = ("In Testing", "Unit Testing")
+_IN_TESTING_EXACT_NAMES: tuple[str, ...] = (
+    "In Testing",
+    "Unit Testing",
+    "Under Testing",
+    "Under testing",
+)
 _IN_TESTING_KEYWORD_SETS: tuple[tuple[str, ...], ...] = (
+    ("under", "testing"),
     ("in", "testing"),
-    ("testing",),
+)
+_IN_TESTING_EXCLUDE: tuple[str, ...] = ("complete", "completed")
+
+_JIRA_DEPARTMENT_FIELD_NAME = "Department"
+_JIRA_DEPARTMENT_DEFAULT_VALUE = "Development"
+_WRITEBACK_FIELD_NAMES: tuple[str, ...] = (
+    "unit testing",
+    "unit testing field",
+    "impact analysis",
+    "admin/ database",
+    "admin/database",
+    "admin database",
 )
 
 
@@ -393,17 +442,439 @@ async def ensure_in_testing_status(
     jira: JiraClient,
     issue_key: str,
     current_status: str | None = None,
+    *,
+    db: AsyncSession | None = None,
 ) -> str:
     """Move issue to In Testing / Unit Testing after deployment completes successfully."""
     if current_status and _is_in_testing_status(current_status):
         return current_status
+
     return await _transition_issue(
         jira,
         issue_key,
         keyword_sets=_IN_TESTING_KEYWORD_SETS,
         exact_names=_IN_TESTING_EXACT_NAMES,
+        exclude_keywords=_IN_TESTING_EXCLUDE,
         label="In Testing",
+        db=db,
     )
+
+
+async def _department_transition_payload(jira: JiraClient, issue_key: str) -> dict | None:
+    try:
+        field_id = await jira.resolve_field_id(_JIRA_DEPARTMENT_FIELD_NAME)
+    except ValueError:
+        return None
+
+    payload = await build_select_field_payload(
+        jira,
+        issue_key,
+        field_id,
+        _JIRA_DEPARTMENT_DEFAULT_VALUE,
+    )
+    return {field_id: payload}
+
+
+def _transition_field_value_usable(value, meta: dict) -> bool:
+    if value is None:
+        return False
+    schema_type = str((meta.get("schema") or {}).get("type") or "").lower()
+    if schema_type in ("option", "priority", "resolution"):
+        return not JiraClient.is_select_field_empty(value)
+    if schema_type == "user":
+        return bool((value or {}).get("accountId"))
+    if schema_type == "array":
+        return bool(value)
+    if schema_type in ("string", "number"):
+        return bool(str(value).strip())
+    if isinstance(value, dict):
+        if value.get("type") == "doc":
+            return bool(value.get("content"))
+        return bool(value.get("value") or value.get("id") or value.get("name"))
+    return bool(value)
+
+
+def _is_department_transition_field(
+    field_id: str,
+    meta: dict,
+    dept_field_id: str | None,
+) -> bool:
+    name = str(meta.get("name") or "").lower().strip()
+    return field_id == dept_field_id or name == _JIRA_DEPARTMENT_FIELD_NAME.lower()
+
+
+def _is_writeback_transition_field(
+    field_id: str,
+    meta: dict,
+    *,
+    dept_field_id: str | None = None,
+    skip_field_ids: set[str] | None = None,
+) -> bool:
+    """Fields Delivery Manager updates separately — never send on status transitions."""
+    if _is_department_transition_field(field_id, meta, dept_field_id):
+        return True
+    if skip_field_ids and field_id in skip_field_ids:
+        return True
+    name = str(meta.get("name") or "").lower().strip()
+    return any(
+        name == pattern or pattern in name
+        for pattern in _WRITEBACK_FIELD_NAMES
+    )
+
+
+async def _transition_skip_field_ids(
+    jira: JiraClient,
+    db: AsyncSession | None = None,
+) -> set[str]:
+    skip: set[str] = set()
+    try:
+        skip.add(await jira.resolve_field_id(_JIRA_DEPARTMENT_FIELD_NAME))
+    except ValueError:
+        pass
+
+    if db is not None:
+        for resolver in (
+            jira_impact_analysis_field_id,
+            jira_unit_testing_field_id,
+            jira_admin_database_field_id,
+        ):
+            field_id = await resolver(db)
+            if field_id:
+                skip.add(field_id)
+        return skip
+
+    for names in (
+        "Impact Analysis",
+        ("Unit Testing Field", "Unit Testing"),
+        ("Admin/ Database", "Admin/Database", "Admin Database"),
+    ):
+        try:
+            skip.add(await jira.resolve_field_id(names))
+        except ValueError:
+            pass
+    return skip
+
+
+def _parse_jira_unsettable_fields(exc: Exception) -> set[str]:
+    """Field ids Jira rejected because they are not on the transition screen."""
+    text = str(exc)
+    fields = set(re.findall(r"(customfield_\d+):", text))
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            for key, msg in (response.json().get("errors") or {}).items():
+                if key.startswith("customfield_") and "cannot be set" in str(msg).lower():
+                    fields.add(key)
+        except Exception:
+            pass
+    return fields
+
+
+def _strip_skip_fields_from_transition_payload(
+    transition: dict,
+    payload: dict | None,
+    *,
+    dept_field_id: str | None = None,
+    skip_field_ids: set[str] | None = None,
+) -> dict | None:
+    if not payload:
+        return None
+    field_meta = transition.get("fields") or {}
+    filtered = {
+        field_id: value
+        for field_id, value in payload.items()
+        if not _is_writeback_transition_field(
+            field_id,
+            field_meta.get(field_id) or {},
+            dept_field_id=dept_field_id,
+            skip_field_ids=skip_field_ids,
+        )
+    }
+    return filtered or None
+
+
+def _strip_unsettable_transition_fields(fields: dict | None, unsettable: set[str]) -> dict | None:
+    if not fields or not unsettable:
+        return fields
+    filtered = {field_id: value for field_id, value in fields.items() if field_id not in unsettable}
+    return filtered or None
+
+
+def _default_transition_field_value(meta: dict) -> dict | str | None:
+    schema = meta.get("schema") or {}
+    schema_type = str(schema.get("type") or "").lower()
+    if schema_type in ("resolution", "option", "priority") or schema.get("custom"):
+        allowed = meta.get("allowedValues") or []
+        if not allowed:
+            return None
+        opt = allowed[0]
+        if opt.get("id") is not None:
+            return {"id": str(opt["id"])}
+        if opt.get("value"):
+            return {"value": str(opt["value"])}
+    return None
+
+
+async def _resolve_transition_required_fields(
+    jira: JiraClient,
+    issue_key: str,
+    transition: dict,
+    *,
+    skip_field_ids: set[str] | None = None,
+) -> dict:
+    """Build payload for required fields declared on a Jira transition screen."""
+    field_meta = transition.get("fields") or {}
+    if not field_meta:
+        return {}
+
+    dept_field_id: str | None = None
+    try:
+        dept_field_id = await jira.resolve_field_id(_JIRA_DEPARTMENT_FIELD_NAME)
+    except ValueError:
+        pass
+
+    payload: dict = {}
+    for field_id, meta in field_meta.items():
+        if not meta.get("required"):
+            continue
+
+        if _is_writeback_transition_field(
+            field_id,
+            meta,
+            dept_field_id=dept_field_id,
+            skip_field_ids=skip_field_ids,
+        ):
+            continue
+
+        schema = meta.get("schema") or {}
+        schema_type = str(schema.get("type") or "").lower()
+
+        if schema_type == "resolution":
+            allowed = meta.get("allowedValues") or []
+            preferred = ("done", "fixed", "complete", "completed")
+            chosen = None
+            for target in preferred:
+                for option in allowed:
+                    option_name = str(option.get("name") or "").lower().strip()
+                    if option_name == target:
+                        chosen = option
+                        break
+                if chosen:
+                    break
+            if not chosen and allowed:
+                chosen = allowed[0]
+            if chosen and chosen.get("id") is not None:
+                payload[field_id] = {"id": str(chosen["id"])}
+            continue
+
+        if schema_type == "user" and field_id == "assignee":
+            try:
+                myself = await jira.get_myself()
+                account_id = str(myself.get("accountId") or "").strip()
+                if account_id:
+                    payload[field_id] = {"accountId": account_id}
+            except Exception:
+                pass
+            continue
+
+        default_value = _default_transition_field_value(meta)
+        if default_value is not None:
+            payload[field_id] = default_value
+
+    return payload
+
+
+async def _fill_transition_fields_from_issue(
+    jira: JiraClient,
+    issue_key: str,
+    transition: dict,
+    payload: dict,
+    *,
+    skip_field_ids: set[str] | None = None,
+) -> dict:
+    """Copy existing issue values for required transition fields not yet in the payload."""
+    field_meta = transition.get("fields") or {}
+    missing = [
+        field_id
+        for field_id, meta in field_meta.items()
+        if meta.get("required") and field_id not in payload
+    ]
+    if not missing:
+        return payload
+
+    issue = await jira.get_issue(issue_key, extra_fields=missing)
+    issue_fields = issue.get("fields") or {}
+
+    dept_field_id: str | None = None
+    try:
+        dept_field_id = await jira.resolve_field_id(_JIRA_DEPARTMENT_FIELD_NAME)
+    except ValueError:
+        pass
+
+    result = dict(payload)
+    for field_id in missing:
+        meta = field_meta[field_id]
+        if _is_writeback_transition_field(
+            field_id,
+            meta,
+            dept_field_id=dept_field_id,
+            skip_field_ids=skip_field_ids,
+        ):
+            continue
+
+        value = issue_fields.get(field_id)
+        if _transition_field_value_usable(value, meta):
+            result[field_id] = value
+            continue
+
+        default_value = _default_transition_field_value(meta)
+        if default_value is not None:
+            result[field_id] = default_value
+
+    return result
+
+
+def _unfilled_required_transition_fields(transition: dict, payload: dict | None) -> list[str]:
+    field_meta = transition.get("fields") or {}
+    filled = payload or {}
+    missing: list[str] = []
+    for field_id, meta in field_meta.items():
+        if meta.get("required") and field_id not in filled:
+            missing.append(str(meta.get("name") or field_id))
+    return missing
+
+
+def _filter_fields_to_transition_screen(transition: dict, fields: dict | None) -> dict | None:
+    """Drop fields that are not on this transition's screen — Jira rejects them with 400."""
+    if not fields:
+        return None
+    allowed = set((transition.get("fields") or {}).keys())
+    if not allowed:
+        return None
+    filtered = {field_id: value for field_id, value in fields.items() if field_id in allowed}
+    return filtered or None
+
+
+async def _merge_transition_fields(
+    jira: JiraClient,
+    issue_key: str,
+    transition: dict,
+    explicit_fields: dict | None,
+    *,
+    skip_field_ids: set[str] | None = None,
+) -> dict | None:
+    skip_ids = skip_field_ids if skip_field_ids is not None else await _transition_skip_field_ids(jira)
+    resolved = await _resolve_transition_required_fields(
+        jira,
+        issue_key,
+        transition,
+        skip_field_ids=skip_ids,
+    )
+    resolved = await _fill_transition_fields_from_issue(
+        jira,
+        issue_key,
+        transition,
+        resolved,
+        skip_field_ids=skip_ids,
+    )
+    if explicit_fields:
+        field_meta = transition.get("fields") or {}
+        dept_field_id: str | None = None
+        try:
+            dept_field_id = await jira.resolve_field_id(_JIRA_DEPARTMENT_FIELD_NAME)
+        except ValueError:
+            pass
+        for field_id, value in explicit_fields.items():
+            meta = field_meta.get(field_id) or {}
+            if meta.get("required") and not _is_writeback_transition_field(
+                field_id,
+                meta,
+                dept_field_id=dept_field_id,
+                skip_field_ids=skip_ids,
+            ):
+                resolved[field_id] = value
+    screened = _filter_fields_to_transition_screen(transition, resolved)
+    screened = _strip_skip_fields_from_transition_payload(
+        transition,
+        screened,
+        skip_field_ids=skip_ids,
+    )
+    return await filter_settable_transition_fields(jira, issue_key, transition, screened)
+
+
+def _is_in_progress_status(status_name: str) -> bool:
+    lowered = status_name.lower().strip().replace("-", " ")
+    return "in progress" in lowered or lowered == "progress"
+
+
+async def ensure_in_progress_status(
+    jira: JiraClient,
+    issue_key: str,
+    current_status: str | None = None,
+) -> str:
+    """Move issue to In Progress when implementation begins."""
+    if current_status and _is_in_progress_status(current_status):
+        return current_status
+
+    transition_fields = await _ensure_department_for_estimation(jira, issue_key)
+    try:
+        return await _transition_issue(
+            jira,
+            issue_key,
+            keyword_sets=_IN_PROGRESS_KEYWORD_SETS,
+            exact_names=_IN_PROGRESS_EXACT_NAMES,
+            exclude_keywords=_IN_PROGRESS_EXCLUDE,
+            label="In Progress",
+            transition_fields=transition_fields,
+        )
+    except PipelineError:
+        if transition_fields:
+            raise
+        fallback_fields = await _department_transition_payload(jira, issue_key)
+        if not fallback_fields:
+            raise
+        return await _transition_issue(
+            jira,
+            issue_key,
+            keyword_sets=_IN_PROGRESS_KEYWORD_SETS,
+            exact_names=_IN_PROGRESS_EXACT_NAMES,
+            exclude_keywords=_IN_PROGRESS_EXCLUDE,
+            label="In Progress",
+            transition_fields=fallback_fields,
+        )
+
+
+async def _ensure_department_for_estimation(jira: JiraClient, issue_key: str) -> dict | None:
+    """Set Department to Development when missing — required by some Jira workflows."""
+    try:
+        field_id = await jira.resolve_field_id(_JIRA_DEPARTMENT_FIELD_NAME)
+    except ValueError:
+        return None
+
+    try:
+        issue = await jira.get_issue(issue_key, extra_fields=[field_id])
+        current = (issue.get("fields") or {}).get(field_id)
+        if not JiraClient.is_select_field_empty(current):
+            return None
+
+        try:
+            await jira.set_select_field_value(issue_key, field_id, _JIRA_DEPARTMENT_DEFAULT_VALUE)
+            return None
+        except Exception:
+            option_id = await jira._resolve_select_option_id(
+                issue_key,
+                field_id,
+                _JIRA_DEPARTMENT_DEFAULT_VALUE,
+            )
+            if option_id:
+                payload = JiraClient.select_field_payload(
+                    _JIRA_DEPARTMENT_DEFAULT_VALUE,
+                    option_id=option_id,
+                )
+                return {field_id: payload}
+            return await _department_transition_payload(jira, issue_key)
+    except Exception:
+        return await _department_transition_payload(jira, issue_key)
 
 
 async def ensure_in_estimation_status(
@@ -414,14 +885,33 @@ async def ensure_in_estimation_status(
     """Move issue to In Estimation unless it is already in an estimation status."""
     if _is_in_estimation_status(current_status):
         return current_status
-    return await _transition_issue(
-        jira,
-        issue_key,
-        keyword_sets=_IN_ESTIMATION_KEYWORD_SETS,
-        exact_names=_IN_ESTIMATION_EXACT_NAMES,
-        exclude_keywords=_IN_ESTIMATION_EXCLUDE,
-        label="In Estimation",
-    )
+
+    transition_fields = await _ensure_department_for_estimation(jira, issue_key)
+    try:
+        return await _transition_issue(
+            jira,
+            issue_key,
+            keyword_sets=_IN_ESTIMATION_KEYWORD_SETS,
+            exact_names=_IN_ESTIMATION_EXACT_NAMES,
+            exclude_keywords=_IN_ESTIMATION_EXCLUDE,
+            label="In Estimation",
+            transition_fields=transition_fields,
+        )
+    except PipelineError:
+        if transition_fields:
+            raise
+        fallback_fields = await _department_transition_payload(jira, issue_key)
+        if not fallback_fields:
+            raise
+        return await _transition_issue(
+            jira,
+            issue_key,
+            keyword_sets=_IN_ESTIMATION_KEYWORD_SETS,
+            exact_names=_IN_ESTIMATION_EXACT_NAMES,
+            exclude_keywords=_IN_ESTIMATION_EXCLUDE,
+            label="In Estimation",
+            transition_fields=fallback_fields,
+        )
 
 
 async def ensure_estimation_complete_status(
@@ -485,13 +975,17 @@ async def _fetch_issue_snapshot(jira: JiraClient, issue_key: str) -> dict:
     fields = issue.get("fields", {})
     project = fields.get("project") or {}
     timetracking = fields.get("timetracking") or {}
+    attachments = JiraClient.issue_attachments(issue)
+    issue_type = fields.get("issuetype") or {}
     snapshot = {
         "issue_id": str(issue.get("id", "")),
         "project_key": project.get("key", issue_key.split("-")[0]),
         "summary": fields.get("summary") or issue_key,
         "description": JiraClient.extract_description(issue),
         "status_name": (fields.get("status") or {}).get("name", ""),
-        "jira_comments": JiraClient.normalize_comments(raw_comments),
+        "issue_type": issue_type.get("name", ""),
+        "issue_type_icon": issue_type.get("iconUrl", ""),
+        "jira_comments": JiraClient.normalize_comments(raw_comments, attachments),
         "timetracking": timetracking,
     }
     snapshot["has_original_estimate"] = _jira_has_original_estimate(snapshot)
@@ -504,6 +998,8 @@ def _apply_issue_snapshot_to_run(run: DeliveryRun, snapshot: dict) -> dict:
     ctx["summary"] = snapshot["summary"]
     ctx["description"] = snapshot["description"]
     ctx["status_name"] = snapshot["status_name"]
+    ctx["issue_type"] = snapshot.get("issue_type") or ""
+    ctx["issue_type_icon"] = snapshot.get("issue_type_icon") or ""
     ctx["jira_comments"] = snapshot["jira_comments"]
     ctx["jira_synced_at"] = datetime.now(timezone.utc).isoformat()
     run.context_data = ctx
@@ -581,6 +1077,63 @@ def _step_completed(run: DeliveryRun, step: str) -> bool:
         if isinstance(entry, dict) and entry.get("step") == step and entry.get("status") == "completed":
             return True
     return False
+
+
+def _verification_screenshot_path(run_id: uuid.UUID, environment: str) -> Path:
+    env_slug = "beta" if environment.lower() in ("beta", "staging") else "master"
+    return _RUN_DATA_ROOT / str(run_id) / f"verification-{env_slug}.png"
+
+
+def verification_screenshot_file(run_id: uuid.UUID, environment: str) -> Path | None:
+    """Return the on-disk verification screenshot when it exists."""
+    for candidate in (
+        _verification_screenshot_path(run_id, environment),
+        _verification_screenshot_path(run_id, "Staging" if environment.lower() in ("beta", "staging") else "Live"),
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _build_verification_draft_comment(
+    environment: str,
+    website_url: str,
+    analysis: dict,
+    filename: str,
+) -> str:
+    findings = analysis.get("findings") or []
+    findings_text = "\n".join(f"- {item}" for item in findings) or "- No specific findings"
+    comment = (
+        f"[Delivery Manager] {environment} website testing — Unit Testing\n\n"
+        f"URL: {website_url}\n"
+        f"Result: {'Passed' if analysis.get('passed') else 'Needs review'}\n\n"
+        f"{analysis.get('summary', '')}\n\n"
+        f"Findings:\n{findings_text}"
+    )
+    if analysis.get("recommendations"):
+        comment += f"\n\nRecommendations:\n{analysis['recommendations']}"
+    return comment
+
+
+def _environment_label_for_target(target: MergeTarget) -> str:
+    return "Staging" if target == "beta" else "Live"
+
+
+def _reset_environment_verification(run: DeliveryRun, ctx: dict, target: MergeTarget) -> None:
+    verify_step = "verify_beta" if target == "beta" else "verify_master"
+    env_label = _environment_label_for_target(target)
+    run.steps_log = [
+        entry
+        for entry in (run.steps_log or [])
+        if not (isinstance(entry, dict) and entry.get("step") == verify_step)
+    ]
+    ctx["verifications"] = [
+        item
+        for item in (ctx.get("verifications") or [])
+        if not (isinstance(item, dict) and item.get("environment") == env_label)
+    ]
+    ctx.pop("pending_verification", None)
+    ctx.pop(f"{env_label.lower()}_verification", None)
 
 
 def _latest_step_status(run: DeliveryRun, step: str) -> str | None:
@@ -976,6 +1529,122 @@ async def _jira_comment(jira: JiraClient, issue_key: str, body: str) -> None:
         raise PipelineError(f"Jira comment failed: {exc}") from exc
 
 
+def _is_admin_related_path(path: str) -> bool:
+    normalized = path.strip().lstrip("/").lower()
+    if not normalized:
+        return False
+    segments = normalized.split("/")
+    if "admin" in segments:
+        return True
+    return segments[-1] == "system.xml"
+
+
+def _admin_related_changed_paths(changed_files: list) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for item in changed_files:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip().lstrip("/")
+        if not path or path in seen or not _is_admin_related_path(path):
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
+
+
+def _build_admin_database_field_content(paths: list[str]) -> str:
+    return "\n".join(path for path in paths if path.strip())
+
+
+async def _update_admin_database_field(
+    jira: JiraClient,
+    issue_key: str,
+    paths: list[str],
+    *,
+    configured_field_id: str | None = None,
+) -> str:
+    text = _build_admin_database_field_content(paths)
+    if not text:
+        return ""
+
+    try:
+        field_id = await jira.resolve_field_id(
+            ("Admin/ Database", "Admin/Database", "Admin Database"),
+            configured_field_id,
+        )
+    except ValueError as exc:
+        raise PipelineError(str(exc)) from exc
+
+    try:
+        await jira.set_paragraph_field(issue_key, field_id, text)
+    except Exception as exc:
+        raise PipelineError(f"Failed to update Admin/ Database field: {exc}") from exc
+
+    return field_id
+
+
+def _build_unit_testing_field_content(verifications: list[dict]) -> str:
+    sections: list[str] = []
+    for item in verifications:
+        if not isinstance(item, dict):
+            continue
+        comment = str(item.get("comment") or "").strip()
+        if not comment:
+            continue
+        environment = str(item.get("environment") or "Site").strip()
+        sections.append(f"{environment}\n\n{comment}")
+    return "\n\n---\n\n".join(sections)
+
+
+async def _update_unit_testing_field(
+    jira: JiraClient,
+    issue_key: str,
+    verifications: list[dict],
+    *,
+    configured_field_id: str | None = None,
+) -> str:
+    text = _build_unit_testing_field_content(verifications)
+    if not text:
+        return ""
+
+    try:
+        field_id = await jira.resolve_field_id(
+            ("Unit Testing Field", "Unit Testing"),
+            configured_field_id,
+        )
+    except ValueError as exc:
+        raise PipelineError(str(exc)) from exc
+
+    try:
+        await jira.set_paragraph_field(issue_key, field_id, text)
+    except Exception as exc:
+        raise PipelineError(f"Failed to update Unit Testing Field: {exc}") from exc
+
+    return field_id
+
+
+async def _post_jira_transition(
+    jira: JiraClient,
+    issue_key: str,
+    transition_id: str,
+    fields: dict | None,
+) -> None:
+    fields_attempt = fields
+    for _ in range(5):
+        try:
+            await jira.transition_issue(issue_key, transition_id, fields=fields_attempt)
+            return
+        except Exception as exc:
+            unsettable = _parse_jira_unsettable_fields(exc)
+            if not unsettable or not fields_attempt:
+                raise
+            stripped = _strip_unsettable_transition_fields(fields_attempt, unsettable)
+            if stripped == fields_attempt:
+                raise
+            fields_attempt = stripped
+
+
 async def _transition_issue(
     jira: JiraClient,
     issue_key: str,
@@ -985,9 +1654,11 @@ async def _transition_issue(
     exact_names: tuple[str, ...] | None = None,
     exclude_keywords: tuple[str, ...] | None = None,
     label: str | None = None,
+    transition_fields: dict | None = None,
+    db: AsyncSession | None = None,
 ) -> str:
     try:
-        transitions = await jira.get_transitions(issue_key)
+        transitions = await jira.get_transitions(issue_key, expand_fields=True)
     except Exception as exc:
         raise PipelineError(f"Could not load Jira transitions: {exc}") from exc
 
@@ -1022,11 +1693,54 @@ async def _transition_issue(
             f"No Jira transition to {target}. Available: {names or 'none'}"
         )
 
+    skip_field_ids = await _transition_skip_field_ids(jira, db)
+    merged_fields = await _merge_transition_fields(
+        jira,
+        issue_key,
+        transition,
+        transition_fields,
+        skip_field_ids=skip_field_ids,
+    )
+
+    transition_name = transition.get("name", label or "target status")
     try:
-        await jira.transition_issue(issue_key, transition["id"])
+        await _post_jira_transition(jira, issue_key, transition["id"], merged_fields)
     except Exception as exc:
+        retry_fields = await filter_settable_transition_fields(
+            jira,
+            issue_key,
+            transition,
+            _strip_skip_fields_from_transition_payload(
+                transition,
+                _filter_fields_to_transition_screen(
+                    transition,
+                    await _fill_transition_fields_from_issue(
+                        jira,
+                        issue_key,
+                        transition,
+                        merged_fields or {},
+                        skip_field_ids=skip_field_ids,
+                    ),
+                ),
+                skip_field_ids=skip_field_ids,
+            ),
+        )
+        if retry_fields != (merged_fields or {}):
+            try:
+                await _post_jira_transition(jira, issue_key, transition["id"], retry_fields)
+                return transition["name"]
+            except Exception as retry_exc:
+                exc = retry_exc
+        elif merged_fields:
+            try:
+                await _post_jira_transition(jira, issue_key, transition["id"], None)
+                return transition["name"]
+            except Exception as bare_exc:
+                exc = bare_exc
+        missing = _unfilled_required_transition_fields(transition, retry_fields if retry_fields != (merged_fields or {}) else merged_fields)
+        detail = f" Missing required fields: {', '.join(missing)}." if missing else ""
         raise PipelineError(
-            f"Jira transition to {transition.get('name', label or 'target status')} failed: {exc}"
+            f"Jira transition to {transition_name} failed: {exc}.{detail}"
         ) from exc
     return transition["name"]
 
@@ -1274,7 +1988,7 @@ async def _step_write_impact_analysis(db, run, jira, ctx, session) -> tuple[str,
     try:
         field_id = await jira.resolve_field_id(
             "Impact Analysis",
-            settings.jira_impact_analysis_field or None,
+            await jira_impact_analysis_field_id(db),
         )
     except ValueError as exc:
         raise PipelineError(str(exc)) from exc
@@ -1350,12 +2064,10 @@ async def start_implementation(
             await _complete_step(db, run, ctx, "impact_analysis", result[0], result[1] or None)
 
         if not _step_completed(run, "transition_in_progress"):
-            new_status = await _transition_issue(
+            new_status = await ensure_in_progress_status(
                 jira,
                 run.jira_issue_key,
-                "progress",
-                fallback_keywords=("in", "progress"),
-                label="In Progress",
+                ctx.get("status_name"),
             )
             ctx["status_name"] = new_status
             await _persist_context(db, run, ctx)
@@ -1624,9 +2336,6 @@ async def confirm_local_and_create_prs(
 ) -> DeliveryRun:
     """Backward-compatible alias for create_prs_from_local."""
     return await create_prs_from_local(db, run, session)
-
-
-MergeTarget = Literal["beta", "master"]
 
 
 def _pr_ids_for_run(run: DeliveryRun, ctx: dict) -> tuple[int | None, int | None]:
@@ -2064,6 +2773,7 @@ async def _transition_to_in_testing_after_merge(
             jira,
             run.jira_issue_key,
             ctx.get("status_name"),
+            db=db,
         )
         ctx["status_name"] = new_status
         await _log_step(
@@ -2135,11 +2845,36 @@ async def _continue_merge_flow_after_deploy(
     env_label = "Staging" if target == "beta" else "Live"
     verify_step = "verify_beta" if target == "beta" else "verify_master"
 
+    if target == "beta" and _step_completed(run, "deploy_beta"):
+        ctx = await _transition_to_in_testing_after_merge(db, run, jira, ctx)
+        run.context_data = ctx
+        await db.commit()
+        await db.refresh(run)
+
     if not _step_completed(run, verify_step):
-        await _log_step(db, run, verify_step, "running", f"Testing {env_label} website…")
+        latest_verify = _latest_step_status(run, verify_step)
+        pending = ctx.get("pending_verification")
+        if latest_verify == "running" and isinstance(pending, dict) and pending.get("environment"):
+            ctx["workflow_phase"] = "pr_review"
+            run.context_data = ctx
+            run.status = "awaiting_approval"
+            run.error_message = None
+            await db.commit()
+            await db.refresh(run)
+            return run
+        if latest_verify != "running":
+            await _log_step(db, run, verify_step, "running", f"Testing {env_label} website…")
         result = await _step_verify_website(db, run, jira, ctx, env_label, session)
-        await _log_step(db, run, verify_step, "completed", result[0], data=result[1] or None)
         ctx.update(result[1] or {})
+        if ctx.get("pending_verification"):
+            run.context_data = ctx
+            ctx["workflow_phase"] = "pr_review"
+            run.status = "awaiting_approval"
+            run.error_message = None
+            await db.commit()
+            await db.refresh(run)
+            return run
+        await _log_step(db, run, verify_step, "completed", result[0], data=result[1] or None)
 
     if target == "beta" and is_unified_deploy_target(mapping):
         if not _step_completed(run, "deploy_master"):
@@ -2156,6 +2891,15 @@ async def _continue_merge_flow_after_deploy(
         if not _step_completed(run, "verify_master"):
             await _log_step(db, run, "verify_master", "running", "Testing Live website…")
             master_result = await _step_verify_website(db, run, jira, ctx, "Live", session)
+            ctx.update(master_result[1] or {})
+            if ctx.get("pending_verification"):
+                run.context_data = ctx
+                ctx["workflow_phase"] = "pr_review"
+                run.status = "awaiting_approval"
+                run.error_message = None
+                await db.commit()
+                await db.refresh(run)
+                return run
             await _log_step(
                 db,
                 run,
@@ -2173,7 +2917,6 @@ async def _continue_merge_flow_after_deploy(
         merged_summary.append(f"Live PR #{master_pr_id}" if master_pr_id else "Live")
 
     if _all_prs_merged(run, ctx) and _all_required_deployments_succeeded(run, ctx, mapping):
-        ctx = await _transition_to_in_testing_after_merge(db, run, jira, ctx)
         return await _finalize_completed_run(db, run, jira, ctx, merged_summary)
 
     ctx["workflow_phase"] = "pr_review"
@@ -2354,7 +3097,9 @@ async def retry_deployment(
     ctx = dict(run.context_data or {})
     retry_target = target or ctx.get("pending_deploy_retry")
     if retry_target not in ("beta", "master"):
-        raise PipelineError("No failed deployment to retry")
+        raise PipelineError("Deployment target (beta or master) is required")
+
+    manual_redeploy = target is not None and not ctx.get("pending_deploy_retry")
 
     if retry_target == "beta":
         if not ctx.get("beta_merged"):
@@ -2368,7 +3113,10 @@ async def retry_deployment(
         deploy_step = "deploy_master"
 
     if run.status not in ("awaiting_approval", "running", "failed"):
-        raise PipelineError("Run is not ready for deployment retry")
+        raise PipelineError("Run is not ready for deployment")
+
+    if manual_redeploy or target is not None:
+        _reset_environment_verification(run, ctx, retry_target)
 
     beta_pr_id, master_pr_id = _pr_ids_for_run(run, ctx)
     jira = jira_client_from_session(session)
@@ -2377,6 +3125,8 @@ async def retry_deployment(
     run.status = "running"
     run.error_message = None
     await db.commit()
+
+    deploy_trigger = "manual" if manual_redeploy else "retry"
 
     try:
         await _run_environment_deploy_step(
@@ -2387,7 +3137,7 @@ async def retry_deployment(
             env_label,
             deploy_step,
             session,
-            trigger="retry",
+            trigger=deploy_trigger,
         )
         return await _continue_merge_flow_after_deploy(
             db,
@@ -2399,12 +3149,120 @@ async def retry_deployment(
             retry_target,
             beta_pr_id,
             master_pr_id,
-            deploy_trigger="retry",
+            deploy_trigger=deploy_trigger,
         )
     except PipelineError as exc:
         return await _handle_post_merge_failure(db, run, dict(run.context_data or {}), retry_target, exc)
     except Exception as exc:
         return await _handle_post_merge_failure(db, run, dict(run.context_data or {}), retry_target, exc)
+
+
+async def post_website_verification(
+    db: AsyncSession,
+    run: DeliveryRun,
+    session: dict,
+    comment: str,
+) -> DeliveryRun:
+    if run.status == "running":
+        raise PipelineError("A step is already running")
+
+    ctx = dict(run.context_data or {})
+    pending = ctx.get("pending_verification")
+    if not isinstance(pending, dict) or not pending.get("environment"):
+        raise PipelineError("No website verification awaiting review")
+
+    environment = str(pending.get("environment", ""))
+    verify_step = "verify_beta" if environment.lower() in ("beta", "staging") else "verify_master"
+
+    jira = jira_client_from_session(session)
+    filename = str(pending.get("screenshot_filename") or "verification.png")
+    screenshot_path = Path(str(pending.get("screenshot_path") or ""))
+    if not screenshot_path.is_file():
+        resolved = verification_screenshot_file(run.id, environment)
+        if resolved is None:
+            raise PipelineError("Verification screenshot not found; redeploy to capture again")
+        screenshot_path = resolved
+
+    screenshot_bytes = screenshot_path.read_bytes()
+    await jira.add_attachment(run.jira_issue_key, filename, screenshot_bytes)
+
+    full_comment = (comment or pending.get("draft_comment") or "").strip()
+    if not full_comment:
+        raise PipelineError("Verification comment cannot be empty")
+    await _jira_comment(jira, run.jira_issue_key, full_comment)
+
+    verification_record = {
+        "environment": environment,
+        "url": str(pending.get("url") or ""),
+        "passed": bool(pending.get("passed")),
+        "summary": str(pending.get("summary") or ""),
+        "findings": [str(item) for item in (pending.get("findings") or []) if str(item).strip()],
+        "screenshot_filename": filename,
+        "comment": full_comment,
+    }
+    verifications = [
+        item
+        for item in (ctx.get("verifications") or [])
+        if not (isinstance(item, dict) and item.get("environment") == environment)
+    ]
+    verifications.append(verification_record)
+
+    unit_testing_field = await _update_unit_testing_field(
+        jira,
+        run.jira_issue_key,
+        verifications,
+        configured_field_id=await jira_unit_testing_field_id(db),
+    )
+
+    admin_paths = _admin_related_changed_paths(ctx.get("changed_files") or [])
+    admin_database_field = ""
+    if admin_paths:
+        admin_database_field = await _update_admin_database_field(
+            jira,
+            run.jira_issue_key,
+            admin_paths,
+            configured_field_id=await jira_admin_database_field_id(db),
+        )
+
+    ctx.pop("pending_verification", None)
+    ctx["verifications"] = verifications
+    ctx[f"{environment.lower()}_verification"] = verification_record
+
+    run.status = "running"
+    run.error_message = None
+    run.context_data = ctx
+    await db.commit()
+
+    await _log_step(
+        db,
+        run,
+        verify_step,
+        "completed",
+        f"{environment} verification posted to Jira",
+        data={
+            "verifications": verifications,
+            f"{environment.lower()}_verification": verification_record,
+            "unit_testing_field": unit_testing_field or None,
+            "admin_database_field": admin_database_field or None,
+            "admin_paths": admin_paths or None,
+        },
+    )
+
+    mapping = await _load_fresh_mapping(db, run.project_key)
+    merge_target: MergeTarget = "beta" if environment.lower() in ("beta", "staging") else "master"
+    beta_pr_id, master_pr_id = _pr_ids_for_run(run, dict(run.context_data or {}))
+    return await _continue_merge_flow_after_deploy(
+        db,
+        run,
+        jira,
+        dict(run.context_data or {}),
+        mapping,
+        session,
+        merge_target,
+        beta_pr_id,
+        master_pr_id,
+        deploy_trigger="verification_posted",
+    )
 
 
 async def approve_and_merge(
@@ -3972,35 +4830,27 @@ async def _step_verify_website(db, run, jira, ctx, environment: str, session) ->
     )
     analysis = result["analysis"]
     filename = f"{environment.lower()}-{run.jira_issue_key.lower()}.png"
-    await jira.add_attachment(run.jira_issue_key, filename, result["screenshot_png"])
+    screenshot_path = _verification_screenshot_path(run.id, environment)
+    screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+    screenshot_path.write_bytes(result["screenshot_png"])
 
+    draft_comment = _build_verification_draft_comment(environment, website_url, analysis, filename)
     findings = analysis.get("findings") or []
-    findings_text = "\n".join(f"- {item}" for item in findings) or "- No specific findings"
-    comment = (
-        f"[Delivery Manager] {environment} website testing\n\n"
-        f"URL: {website_url}\n"
-        f"Result: {'Passed' if analysis.get('passed') else 'Needs review'}\n\n"
-        f"{analysis.get('summary', '')}\n\n"
-        f"Findings:\n{findings_text}"
-    )
-    if analysis.get("recommendations"):
-        comment += f"\n\nRecommendations:\n{analysis['recommendations']}"
-    comment += f"\n\nScreenshot attached: {filename}"
-    await _jira_comment(jira, run.jira_issue_key, comment)
-
-    verification_record = {
+    admin_paths = _admin_related_changed_paths(ctx.get("changed_files") or [])
+    pending_verification = {
         "environment": environment,
         "url": website_url,
         "passed": bool(analysis.get("passed")),
         "summary": analysis.get("summary", ""),
         "findings": findings,
+        "draft_comment": draft_comment,
         "screenshot_filename": filename,
+        "screenshot_path": str(screenshot_path),
+        "admin_paths": admin_paths,
     }
-    verifications = list(ctx.get("verifications") or [])
-    verifications.append(verification_record)
     return (
-        f"{environment} verification {'passed' if verification_record['passed'] else 'flagged'}: {website_url}",
-        {"verifications": verifications, f"{environment.lower()}_verification": verification_record},
+        f"{environment} website captured — review draft comment before posting to Jira",
+        {"pending_verification": pending_verification},
     )
 
 

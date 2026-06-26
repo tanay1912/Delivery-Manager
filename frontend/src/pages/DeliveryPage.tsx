@@ -3,24 +3,27 @@ import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError, DeliveryRun, User } from "../api/client";
 import AIWorkingPanel, { BOOT_STEPS, PREPARE_STEPS } from "../components/AIWorkingPanel";
 import ChangedFilesSection from "../components/ChangedFilesSection";
-import CollapsedStepCard from "../components/CollapsedStepCard";
 import ConfirmModal from "../components/ConfirmModal";
-import DangerZone from "../components/DangerZone";
 import DeliveryActionBar from "../components/DeliveryActionBar";
 import { ErrorBanner, SuccessBanner } from "../components/FeedbackBanner";
 import FileDiffViewer from "../components/FileDiffViewer";
 import JiraCommentCard from "../components/JiraCommentCard";
-import LinkifiedText from "../components/LinkifiedText";
+import IssueTypeIcon from "../components/IssueTypeIcon";
+import JiraRichText from "../components/JiraRichText";
 import Layout from "../components/Layout";
 import LocalDevelopmentPanel from "../components/LocalDevelopmentPanel";
 import PipelineStepper from "../components/PipelineStepper";
 import PullRequestDetailsCard from "../components/PullRequestDetailsCard";
+import DeploymentLogsPanel from "../components/DeploymentLogsPanel";
 import { TerminalLine } from "../components/DeploymentTerminal";
 import VerificationPanel from "../components/VerificationPanel";
 import { useToast } from "../context/ToastContext";
 import {
   getActiveUiStep,
-  hasExecutedAnyStep,
+  getRevisionHistoryEntries,
+  hasDeploymentAttempt,
+  isRevisionInProgress,
+  isVerificationInProgress,
   resolveUiStepForRun,
   writeStoredUiStep,
 } from "../utils/deliverySteps";
@@ -31,19 +34,7 @@ type DeliveryNavState = {
   issueSummary?: string;
 };
 
-function DeliveryStepSection({
-  step,
-  children,
-}: {
-  step: number;
-  children: React.ReactNode;
-}) {
-  return (
-    <div id={`delivery-step-${step}`} className="scroll-mt-24">
-      {children}
-    </div>
-  );
-}
+const STEP_LABELS = ["Estimation", "Implementation", "Pull Request", "Verification"] as const;
 
 function phaseStatus(
   phase: string,
@@ -84,6 +75,146 @@ function toTerminalLines(items: MergeProgressItem[]): TerminalLine[] {
   }));
 }
 
+function deploymentHistoryTerminalLines(
+  history: DeliveryRun["deployment_history"],
+  environment: "beta" | "master" | null,
+  activeAttemptId: string | null,
+): TerminalLine[] {
+  if (!environment) return [];
+  const lines: TerminalLine[] = [];
+  const previousAttempts = (history ?? []).filter(
+    (attempt) =>
+      attempt.environment === environment &&
+      attempt.id !== activeAttemptId &&
+      attempt.status !== "running",
+  );
+
+  for (const attempt of previousAttempts) {
+    const headerStatus: TerminalLine["status"] =
+      attempt.status === "failed" ? "failed" : attempt.status === "completed" ? "done" : "pending";
+    const when = attempt.started_at
+      ? new Date(attempt.started_at).toLocaleString()
+      : "unknown time";
+    lines.push({
+      id: `history-${attempt.id}-header`,
+      text: `[Previous attempt · ${attempt.trigger}] ${attempt.environment_label} deployment — ${when}`,
+      status: headerStatus,
+    });
+
+    const planned = plannedCommandsForAttempt(attempt, []);
+    const commandsToShow =
+      planned.length > 0
+        ? planned.map((command, index) => ({
+            command,
+            record: attempt.commands.find((cmd) => cmd.index === index),
+          }))
+        : attempt.commands.map((record) => ({ command: record.command, record }));
+
+    for (const { command, record } of commandsToShow) {
+      const cmdStatus: TerminalLine["status"] = record
+        ? record.status === "failed"
+          ? "failed"
+          : record.status === "completed"
+            ? "done"
+            : record.status === "running"
+              ? "active"
+              : "pending"
+        : headerStatus;
+      const output = record?.output?.trim();
+      lines.push({
+        id: `history-${attempt.id}-cmd-${record?.index ?? command}`,
+        text: output ? `${command}\n${output}` : command,
+        status: cmdStatus,
+        nested: true,
+      });
+    }
+
+    if (attempt.error?.trim()) {
+      lines.push({
+        id: `history-${attempt.id}-error`,
+        text: attempt.error.trim(),
+        status: "failed",
+        nested: true,
+      });
+    }
+  }
+
+  return lines;
+}
+
+const STAGING_LOG_STEP_IDS = [
+  "merge_beta_pr",
+  "deploy_beta",
+  "transition_in_testing",
+  "verify_beta",
+] as const;
+
+const LIVE_LOG_STEP_IDS = ["merge_master_pr", "deploy_master", "verify_master"] as const;
+
+function mergeProgressItemBelongsToEnvironment(id: string, environment: "beta" | "master"): boolean {
+  if (environment === "beta") {
+    return (
+      id === "merge_beta_pr" ||
+      id === "deploy_beta" ||
+      id.startsWith("deploy_beta_cmd_") ||
+      id === "transition_in_testing" ||
+      id === "verify_beta"
+    );
+  }
+  return (
+    id === "merge_master_pr" ||
+    id === "deploy_master" ||
+    id.startsWith("deploy_master_cmd_") ||
+    id === "verify_master"
+  );
+}
+
+function filterMergeProgressItemsForEnvironment(
+  items: MergeProgressItem[],
+  environment: "beta" | "master",
+): MergeProgressItem[] {
+  return items.filter((item) => mergeProgressItemBelongsToEnvironment(item.id, environment));
+}
+
+function hasEnvironmentDeploymentHistory(
+  history: DeliveryRun["deployment_history"],
+  environment: "beta" | "master",
+): boolean {
+  return (history ?? []).some((attempt) => attempt.environment === environment);
+}
+
+function hasEnvironmentStepsLog(
+  stepsLog: DeliveryRun["steps_log"],
+  stepIds: readonly string[],
+): boolean {
+  return (stepsLog ?? []).some((entry) => stepIds.includes(entry.step));
+}
+
+function buildDeploymentTerminalLines(
+  run: DeliveryRun,
+  mergeProgressItems: MergeProgressItem[],
+  environment: "beta" | "master",
+  retryingDeployment: boolean,
+  mergingTarget: "beta" | "master" | null,
+): TerminalLine[] {
+  const deployStep = environment === "beta" ? "deploy_beta" : "deploy_master";
+  const mappingCommands =
+    environment === "beta" ? run.staging_deploy_commands : run.live_deploy_commands;
+  const isRetryingThisTarget = retryingDeployment && mergingTarget === environment;
+  const activeAttempt = resolveActiveDeployAttempt(run.deployment_history, deployStep, {
+    retrying: isRetryingThisTarget,
+    plannedCommands: mappingCommands,
+  });
+  const historyLines = deploymentHistoryTerminalLines(
+    run.deployment_history,
+    environment,
+    activeAttempt?.id ?? null,
+  );
+  const filteredItems = filterMergeProgressItemsForEnvironment(mergeProgressItems, environment);
+  const currentLines = toTerminalLines(filteredItems);
+  return [...historyLines, ...currentLines];
+}
+
 function ExternalLinkIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
@@ -120,6 +251,54 @@ function ChevronLeftIcon({ className = "h-4 w-4" }: { className?: string }) {
   );
 }
 
+function DeliveryStepNav({
+  viewStep,
+  maxNavigableStep,
+  onSelect,
+}: {
+  viewStep: number;
+  maxNavigableStep: number;
+  onSelect: (step: number) => void;
+}) {
+  const prev = viewStep > 1 ? viewStep - 1 : null;
+  const next = viewStep < maxNavigableStep ? viewStep + 1 : null;
+  if (!prev && !next) return null;
+
+  return (
+    <div className="flex items-center justify-between gap-3 pt-2">
+      {prev ? (
+        <button
+          type="button"
+          onClick={() => onSelect(prev)}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-gray-50 transition-colors"
+        >
+          <ChevronLeftIcon />
+          {STEP_LABELS[prev - 1]}
+        </button>
+      ) : (
+        <span />
+      )}
+      <span className="text-xs text-slate-500 hidden sm:inline">
+        Step {viewStep} of {maxNavigableStep}
+      </span>
+      {next ? (
+        <button
+          type="button"
+          onClick={() => onSelect(next)}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-gray-50 transition-colors"
+        >
+          {STEP_LABELS[next - 1]}
+          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </button>
+      ) : (
+        <span />
+      )}
+    </div>
+  );
+}
+
 function BackToTicketsLink() {
   return (
     <Link
@@ -132,10 +311,10 @@ function BackToTicketsLink() {
   );
 }
 
-function JiraTicketContent({ run }: { run: DeliveryRun }) {
+function JiraTicketContent({ run, showJiraLink = false }: { run: DeliveryRun; showJiraLink?: boolean }) {
   return (
     <div className="space-y-6">
-      {run.jira_issue_url && (
+      {showJiraLink && run.jira_issue_url && (
         <a
           href={run.jira_issue_url}
           target="_blank"
@@ -151,7 +330,7 @@ function JiraTicketContent({ run }: { run: DeliveryRun }) {
             Description
           </h3>
           <p className="text-slate-700 leading-relaxed whitespace-pre-wrap break-words max-w-prose">
-            <LinkifiedText text={run.description} />
+            <JiraRichText text={run.description} />
           </p>
         </div>
       )}
@@ -250,7 +429,7 @@ function RevisionStepsList({
 }
 
 function RevisionHistory({ stepsLog }: { stepsLog: DeliveryRun["steps_log"] }) {
-  const revisions = stepsLog.filter((entry) => entry.step === "code_revision");
+  const revisions = getRevisionHistoryEntries(stepsLog);
   if (revisions.length === 0) return null;
 
   return (
@@ -479,14 +658,6 @@ function historyCommandStatus(status: string): MergeProgressStatus {
   return "pending";
 }
 
-function latestDeployAttempt(
-  history: DeliveryRun["deployment_history"],
-  deployStep: "deploy_beta" | "deploy_master",
-) {
-  const environment = deployStep === "deploy_beta" ? "beta" : "master";
-  return [...(history ?? [])].reverse().find((attempt) => attempt.environment === environment);
-}
-
 function resolveActiveDeployAttempt(
   history: DeliveryRun["deployment_history"],
   deployStep: "deploy_beta" | "deploy_master",
@@ -552,8 +723,8 @@ function deployCommandItems(
     const total = plannedCommands.length;
     return plannedCommands.map((command, index) => {
       const stepId = `${prefix}${index}`;
-      const runningEntry = stepsLog.find((s) => s.step === stepId && s.status === "running");
       const latest = latestStepEntry(stepsLog, stepId);
+      const runningEntry = latest?.status === "running" ? latest : undefined;
       const historyCmd = attemptCommands.find((cmd) => cmd.index === index);
       const logStatus = runningEntry
         ? "active"
@@ -589,9 +760,9 @@ function deployCommandItems(
 
   return indices.map((index) => {
     const stepId = `${prefix}${index}`;
-    const runningEntry = stepsLog.find((s) => s.step === stepId && s.status === "running");
-    const status = stepLogStatus(stepsLog, stepId);
     const latest = latestStepEntry(stepsLog, stepId);
+    const runningEntry = latest?.status === "running" ? latest : undefined;
+    const status = stepLogStatus(stepsLog, stepId);
     return {
       id: stepId,
       label: runningEntry?.message || latest?.message || `Command ${index + 1}`,
@@ -605,6 +776,7 @@ function buildMergeProgressItems(
   run: DeliveryRun,
   mergingTarget: "beta" | "master" | null,
   deployOnly = false,
+  retryingDeployment = false,
 ): MergeProgressItem[] {
   const { steps_log: stepsLog, unified_deploy_target: unified } = run;
   const items: MergeProgressItem[] = [];
@@ -621,21 +793,35 @@ function buildMergeProgressItems(
   };
 
   const addDeployGroup = (deployStep: "deploy_beta" | "deploy_master", label: string) => {
-    const deployStatus = stepLogStatus(stepsLog, deployStep);
-    const deployEntry = latestStepEntry(stepsLog, deployStep);
-    const plannedCommands =
+    const environment = deployStep === "deploy_beta" ? "beta" : "master";
+    const mappingCommands =
       deployStep === "deploy_beta" ? run.staging_deploy_commands : run.live_deploy_commands;
-    const attemptCommands = latestDeployAttempt(run.deployment_history, deployStep)?.commands ?? [];
-    const commandItems = deployCommandItems(stepsLog, deployStep, plannedCommands, attemptCommands);
+    const isRetryingThisTarget = retryingDeployment && mergingTarget === environment;
+    const activeAttempt = resolveActiveDeployAttempt(run.deployment_history, deployStep, {
+      retrying: isRetryingThisTarget,
+      plannedCommands: mappingCommands,
+    });
+    const scopedStepsLog =
+      isRetryingThisTarget && activeAttempt?.id === "optimistic-retry"
+        ? []
+        : stepsLogSince(stepsLog, activeAttempt?.started_at);
+    const plannedCommands = plannedCommandsForAttempt(activeAttempt, mappingCommands);
+    const attemptCommands = activeAttempt?.commands ?? [];
+    const deployStatus = stepLogStatus(scopedStepsLog, deployStep);
+    const deployEntry = latestStepEntry(scopedStepsLog, deployStep);
+    const commandItems = deployCommandItems(
+      scopedStepsLog,
+      deployStep,
+      plannedCommands,
+      attemptCommands,
+    );
     const deployDetail =
       deployStatus === "failed" && deployEntry?.message ? deployEntry.message : undefined;
-    if (commandItems.length > 0) {
-      items.push({ id: deployStep, label, status: deployStatus, detail: deployDetail });
+    const groupStatus =
+      isRetryingThisTarget && deployStatus === "pending" ? "active" : deployStatus;
+    if (commandItems.length > 0 || groupStatus !== "pending" || isRetryingThisTarget) {
+      items.push({ id: deployStep, label, status: groupStatus, detail: deployDetail });
       items.push(...commandItems);
-      return;
-    }
-    if (deployStatus !== "pending") {
-      items.push({ id: deployStep, label, status: deployStatus, detail: deployDetail });
     }
   };
 
@@ -643,6 +829,10 @@ function buildMergeProgressItems(
     const retryTarget = (run.pending_deploy_retry as "beta" | "master" | null) ?? mergingTarget;
     if (retryTarget === "beta" || (!retryTarget && (run.beta_merged || run.beta_pr_id || run.pr_id))) {
       addDeployGroup("deploy_beta", "Run Staging deployment commands");
+      const transitionStatus = stepLogStatus(stepsLog, "transition_in_testing");
+      if (transitionStatus !== "pending") {
+        addStep("transition_in_testing", "Move ticket to Unit Testing");
+      }
       addStep("verify_beta", "Verify Staging website");
       if (unified) {
         addDeployGroup("deploy_master", "Run Live deployment commands");
@@ -652,16 +842,16 @@ function buildMergeProgressItems(
       addDeployGroup("deploy_master", "Run Live deployment commands");
       addStep("verify_master", "Verify Live website");
     }
-    const transitionStatus = stepLogStatus(stepsLog, "transition_in_testing");
-    if (transitionStatus !== "pending") {
-      addStep("transition_in_testing", "Move ticket to Unit Testing");
-    }
     return items;
   }
 
   if (mergingTarget === "beta" || stepsLog.some((s) => s.step === "merge_beta_pr")) {
     addStep("merge_beta_pr", "Merge Staging pull request");
     addDeployGroup("deploy_beta", "Run Staging deployment commands");
+    const transitionStatus = stepLogStatus(stepsLog, "transition_in_testing");
+    if (transitionStatus !== "pending") {
+      addStep("transition_in_testing", "Move ticket to Unit Testing");
+    }
     addStep("verify_beta", "Verify Staging website");
     if (unified) {
       addDeployGroup("deploy_master", "Run Live deployment commands");
@@ -673,11 +863,6 @@ function buildMergeProgressItems(
     addStep("merge_master_pr", "Merge Live pull request");
     addDeployGroup("deploy_master", "Run Live deployment commands");
     addStep("verify_master", "Verify Live website");
-  }
-
-  const transitionStatus = stepLogStatus(stepsLog, "transition_in_testing");
-  if (transitionStatus !== "pending") {
-    addStep("transition_in_testing", "Move ticket to Unit Testing");
   }
 
   return items;
@@ -715,6 +900,31 @@ function getDeploymentFailureMessage(run: DeliveryRun): string | null {
   return run.error_message;
 }
 
+function resolveActiveDeploymentTarget(
+  run: DeliveryRun,
+  mergingTarget: "beta" | "master" | null,
+  mergeInProgress: boolean,
+): "beta" | "master" | null {
+  if (mergingTarget) return mergingTarget;
+
+  const runningAttempt = (run.deployment_history ?? []).find((attempt) => attempt.status === "running");
+  if (runningAttempt?.environment === "beta" || runningAttempt?.environment === "master") {
+    return runningAttempt.environment;
+  }
+
+  const stepsLog = run.steps_log ?? [];
+  if (stepLogStatus(stepsLog, "deploy_master") === "active") return "master";
+  if (stepLogStatus(stepsLog, "deploy_beta") === "active") return "beta";
+  if (stepLogStatus(stepsLog, "merge_master_pr") === "active") return "master";
+  if (stepLogStatus(stepsLog, "merge_beta_pr") === "active") return "beta";
+
+  if (!mergeInProgress) return null;
+
+  if (!run.beta_merged && (run.beta_pr_id || run.pr_id)) return "beta";
+  if (run.master_pr_id && !run.master_merged) return "master";
+  return null;
+}
+
 function getDeploymentFailureDetail(run: DeliveryRun): string | null {
   if (!run.pending_deploy_retry) return null;
   const failedAttempt = [...(run.deployment_history ?? [])]
@@ -750,6 +960,7 @@ export default function DeliveryPage() {
   const [mergingMaster, setMergingMaster] = useState(false);
   const [retryingDeployment, setRetryingDeployment] = useState(false);
   const [deployRetryTarget, setDeployRetryTarget] = useState<"beta" | "master" | null>(null);
+  const [postingVerification, setPostingVerification] = useState(false);
   const [applyingRevision, setApplyingRevision] = useState(false);
   const [decliningPr, setDecliningPr] = useState(false);
   const [declineReason, setDeclineReason] = useState("");
@@ -764,11 +975,11 @@ export default function DeliveryPage() {
   const [comment, setComment] = useState("");
   const [hours, setHours] = useState("");
   const [question, setQuestion] = useState("");
+  const [viewStep, setViewStep] = useState(1);
   const prepareStarted = useRef(false);
   const lastWorkflowPhase = useRef<string | null>(null);
-  const deploymentRetryRef = useRef<HTMLDivElement | null>(null);
-  const scrolledToDeployment = useRef(false);
-  const scrolledToActiveStep = useRef(false);
+  const workflowStepRef = useRef(1);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const commentEdited = useRef(false);
   const hoursEdited = useRef(false);
   const questionEdited = useRef(false);
@@ -954,50 +1165,44 @@ export default function DeliveryPage() {
     lastWorkflowPhase.current = phase;
   }, [run?.workflow_phase]);
 
-  useEffect(() => {
-    scrolledToDeployment.current = false;
-    scrolledToActiveStep.current = false;
-  }, [run?.id]);
+  const scrollToTop = useCallback(() => {
+    scrollContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+  }, []);
+
+  const selectViewStep = useCallback(
+    (step: number) => {
+      setViewStep(step);
+      if (issueKey) writeStoredUiStep(issueKey, step);
+      scrollToTop();
+    },
+    [issueKey, scrollToTop],
+  );
 
   useEffect(() => {
     if (!run || !issueKey || loading) return;
-    if (!hasExecutedAnyStep(run)) return;
-    writeStoredUiStep(issueKey, getActiveUiStep(run));
-  }, [run, issueKey, loading]);
+    const initial = resolveUiStepForRun(run, issueKey);
+    setViewStep(initial);
+    workflowStepRef.current = getActiveUiStep(run);
+  }, [run?.id, issueKey, loading]);
 
   useEffect(() => {
-    if (!run || !issueKey || loading || scrolledToActiveStep.current) return;
-    if (!hasExecutedAnyStep(run)) return;
-
-    const mergeFailed = getMergeFailureTarget(run);
-    const deployFailed = Boolean(run.pending_deploy_retry) && !mergeFailed;
-    const deployOnly =
-      deployFailed && Boolean(run.beta_merged || run.master_merged);
-    if (deployOnly) return;
-
-    const activeStep = resolveUiStepForRun(run, issueKey);
-    const timer = window.setTimeout(() => {
-      document
-        .getElementById(`delivery-step-${activeStep}`)
-        ?.scrollIntoView({ behavior: "smooth", block: "start" });
-      scrolledToActiveStep.current = true;
-    }, 150);
-    return () => window.clearTimeout(timer);
-  }, [run, issueKey, loading]);
+    if (!run || !issueKey) return;
+    const current = getActiveUiStep(run);
+    if (current > workflowStepRef.current) {
+      setViewStep(current);
+      writeStoredUiStep(issueKey, current);
+      scrollContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+    }
+    workflowStepRef.current = current;
+  }, [run, issueKey]);
 
   useEffect(() => {
-    if (!run || loading) return;
-    const mergeFailed = getMergeFailureTarget(run);
-    const deployFailed = Boolean(run.pending_deploy_retry) && !mergeFailed;
-    const deployOnly =
-      deployFailed && Boolean(run.beta_merged || run.master_merged);
-    if (!deployOnly || scrolledToDeployment.current) return;
-    const timer = window.setTimeout(() => {
-      deploymentRetryRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-      scrolledToDeployment.current = true;
-    }, 150);
-    return () => window.clearTimeout(timer);
-  }, [run, loading]);
+    if (!run || !issueKey) return;
+    if (run.pending_deploy_retry && !getMergeFailureTarget(run)) {
+      setViewStep(3);
+      writeStoredUiStep(issueKey, 3);
+    }
+  }, [run?.pending_deploy_retry, run?.id, issueKey]);
 
   useEffect(() => {
     if (!run || prepareStarted.current) return;
@@ -1212,14 +1417,15 @@ export default function DeliveryPage() {
     }
   };
 
-  const handleRetryDeployment = async () => {
-    if (!run || !run.pending_deploy_retry) return;
-    const target = run.pending_deploy_retry as "beta" | "master";
+  const handleRunDeployment = async (target: "beta" | "master") => {
+    if (!run) return;
     setDeployRetryTarget(target);
     setRetryingDeployment(true);
     setError(null);
     try {
+      const pollPromise = api.getRun(run.id).then((refreshed) => setRun(refreshed)).catch(() => {});
       const updated = await api.retryDeploymentRun(run.id, target);
+      await pollPromise;
       setRun(updated);
       if (updated.error_message) {
         setError(updated.error_message);
@@ -1238,6 +1444,32 @@ export default function DeliveryPage() {
     } finally {
       setRetryingDeployment(false);
       setDeployRetryTarget(null);
+    }
+  };
+
+  const handlePostVerification = async (comment: string) => {
+    if (!run || !comment.trim()) return;
+    setPostingVerification(true);
+    setError(null);
+    try {
+      const updated = await api.postVerification(run.id, comment.trim());
+      setRun(updated);
+      if (updated.error_message) {
+        setError(updated.error_message);
+        toast(updated.error_message, "error");
+      } else {
+        toast("Verification posted to Jira.", "success");
+      }
+    } catch (err) {
+      handleAuthError(err);
+      try {
+        const refreshed = await api.getRun(run.id);
+        setRun(refreshed);
+      } catch {
+        // Keep the surfaced API error if refresh fails.
+      }
+    } finally {
+      setPostingVerification(false);
     }
   };
 
@@ -1306,12 +1538,8 @@ export default function DeliveryPage() {
   const mergeFailedTarget = run ? getMergeFailureTarget(run) : null;
   const deploymentFailed =
     Boolean(run?.pending_deploy_retry) && !mergeFailedTarget && !retryingDeployment;
-  const deploymentErrorMessage = run && deploymentFailed ? getDeploymentFailureMessage(run) : null;
-  const deploymentFailureDetail = run && deploymentFailed ? getDeploymentFailureDetail(run) : null;
   const deployOnlyMode =
     (deploymentFailed || retryingDeployment) && Boolean(run?.beta_merged || run?.master_merged);
-  const mergeErrorMessage =
-    run && mergeFailedTarget ? getMergeFailureMessage(run, mergeFailedTarget) : null;
   const phase = run?.workflow_phase ?? "estimation";
   const hasOpenPrs = Boolean(
     run?.beta_pr_id || run?.pr_id || run?.beta_pr_url || run?.pr_url || run?.master_pr_id || run?.master_pr_url,
@@ -1339,26 +1567,19 @@ export default function DeliveryPage() {
       phase === "pr_review" &&
       prReviewReady &&
       !deploymentFailed);
-  const showMergeProgress =
-    mergeInProgress ||
-    deploymentFailed ||
-    Boolean(mergeFailedTarget) ||
-    (run?.steps_log ?? []).some((entry) =>
-      ["merge_beta_pr", "merge_master_pr", "deploy_beta", "deploy_master"].includes(entry.step),
-    );
   const verificationDone = phase === "completed" && run?.status === "completed";
   const implementationRunning =
     run?.status === "running" ||
     ((phase === "implementation" || phase === "local_development") && run?.status !== "failed");
-  const revisionRunning =
-    applyingRevision || (phase === "pr_review" && run?.status === "running");
+  const revisionInProgress = run ? isRevisionInProgress(run, applyingRevision) : applyingRevision;
+  const deploymentAttempted = run ? hasDeploymentAttempt(run) : false;
   const resolvedComment = run ? resolveDraftComment(run) : "";
   const commentForDisplay = comment.trim() || resolvedComment;
 
   const completedPhases: string[] = [];
   if (estimationPosted) completedPhases.push("estimation");
   if (prReviewReady || verificationDone) completedPhases.push("implementation");
-  if (verificationDone || deployOnlyMode) completedPhases.push("pr_review");
+  if (verificationDone || (run && isVerificationInProgress(run))) completedPhases.push("pr_review");
 
   const step1Status = phaseStatus(phase, "estimation", completedPhases);
   const step2Status =
@@ -1372,9 +1593,7 @@ export default function DeliveryPage() {
   const verificationInProgress =
     merging ||
     retryingDeployment ||
-    deployOnlyMode ||
-    ((run?.verifications ?? []).length > 0 && !verificationDone) ||
-    (run?.status === "running" && phase === "pr_review" && showMergeProgress);
+    Boolean(run && isVerificationInProgress(run));
 
   const step3Status =
     verificationDone || verificationInProgress
@@ -1396,13 +1615,81 @@ export default function DeliveryPage() {
   };
 
   const mergeProgressItems = run
-    ? buildMergeProgressItems(run, mergingTarget, deployOnlyMode)
+    ? buildMergeProgressItems(run, mergingTarget, deployOnlyMode, retryingDeployment)
     : [];
-  const terminalLines = toTerminalLines(
-    showMergeProgress ? mergeProgressItems : [],
+  const activeDeploymentTarget = run
+    ? resolveActiveDeploymentTarget(run, mergingTarget, mergeInProgress)
+    : mergingTarget;
+  const stagingInProgress =
+    mergingBeta ||
+    (retryingDeployment && mergingTarget === "beta") ||
+    (mergeInProgress && activeDeploymentTarget === "beta");
+  const liveInProgress =
+    mergingMaster ||
+    (retryingDeployment && mergingTarget === "master") ||
+    (mergeInProgress && activeDeploymentTarget === "master");
+  const stagingDeploymentFailed =
+    run?.pending_deploy_retry === "beta" &&
+    mergeFailedTarget !== "beta" &&
+    !retryingDeployment;
+  const liveDeploymentFailed =
+    run?.pending_deploy_retry === "master" &&
+    mergeFailedTarget !== "master" &&
+    !retryingDeployment;
+  const stagingRetryingDeployment = retryingDeployment && mergingTarget === "beta";
+  const liveRetryingDeployment = retryingDeployment && mergingTarget === "master";
+  const showStagingLogs = Boolean(
+    run &&
+      (stagingInProgress ||
+        stagingDeploymentFailed ||
+        mergeFailedTarget === "beta" ||
+        hasEnvironmentStepsLog(run.steps_log, STAGING_LOG_STEP_IDS) ||
+        hasEnvironmentDeploymentHistory(run.deployment_history, "beta")),
   );
-  const showActionBar = Boolean(run && prReviewReady && !verificationDone);
-  const actionDisabled = merging || decliningPr || revisionRunning;
+  const showLiveLogs = Boolean(
+    run &&
+      (liveInProgress ||
+        liveDeploymentFailed ||
+        mergeFailedTarget === "master" ||
+        hasEnvironmentStepsLog(run.steps_log, LIVE_LOG_STEP_IDS) ||
+        hasEnvironmentDeploymentHistory(run.deployment_history, "master")),
+  );
+  const stagingTerminalLines =
+    run && showStagingLogs
+      ? buildDeploymentTerminalLines(
+          run,
+          mergeProgressItems,
+          "beta",
+          retryingDeployment,
+          mergingTarget,
+        )
+      : [];
+  const liveTerminalLines =
+    run && showLiveLogs
+      ? buildDeploymentTerminalLines(
+          run,
+          mergeProgressItems,
+          "master",
+          retryingDeployment,
+          mergingTarget,
+        )
+      : [];
+  const showActionBar = Boolean(run && prReviewReady && !verificationDone && viewStep === 3);
+  const actionDisabled = merging || decliningPr || revisionInProgress || postingVerification;
+  const showRequestChanges =
+    run != null &&
+    !deploymentAttempted &&
+    !mergeInProgress &&
+    !retryingDeployment &&
+    (run.status === "awaiting_approval" || revisionInProgress);
+  const showRestartDevelopment =
+    run != null &&
+    run.status === "awaiting_approval" &&
+    deploymentAttempted &&
+    !mergeInProgress &&
+    !revisionInProgress;
+  const canDeployStaging = Boolean(run?.beta_merged && run.staging_deploy_commands.length > 0);
+  const canDeployLive = Boolean(run?.master_merged && run.live_deploy_commands.length > 0);
 
   const completedStepCount = run
     ? [step1Status, step2Status, step3Status, step4Status].filter((s) => s === "completed").length
@@ -1421,14 +1708,19 @@ export default function DeliveryPage() {
     !run.beta_merged &&
     !deploymentFailed;
 
+  const workflowStep = run ? getActiveUiStep(run) : 1;
+  const maxNavigableStep = workflowStep;
+  const pipelineSteps = [
+    { number: 1, label: "Estimation", status: step1Status },
+    { number: 2, label: "Implementation", status: step2Status as "completed" | "active" | "pending" },
+    { number: 3, label: "Pull Request", status: step3Status as "completed" | "active" | "pending" },
+    { number: 4, label: "Verification", status: step4Status as "completed" | "active" | "pending" },
+  ];
+
   return (
     <Layout user={user} siteName={siteName} onLogout={handleLogout}>
-      <div className="min-h-full bg-gray-50">
-        <div
-          className={`sticky top-16 z-40 bg-white/95 backdrop-blur-md border-b border-gray-200 shadow-sm ${
-            showActionBar ? "" : ""
-          }`}
-        >
+      <div className="flex flex-col flex-1 min-h-0 bg-gray-50">
+        <div className="sticky top-0 z-40 flex-shrink-0 bg-white/95 backdrop-blur-md border-b border-gray-200 shadow-sm">
           <div className="max-w-5xl mx-auto px-6 py-3">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
               <BackToTicketsLink />
@@ -1437,6 +1729,11 @@ export default function DeliveryPage() {
                   <div className="hidden sm:block w-px h-8 bg-gray-200 flex-shrink-0" aria-hidden="true" />
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
+                      <IssueTypeIcon
+                        name={run.issue_type}
+                        iconUrl={run.issue_type_icon}
+                        className="h-4 w-4 flex-shrink-0"
+                      />
                       <span className="font-mono text-sm font-semibold text-blue-600">{run.jira_issue_key}</span>
                       {run.jira_status && (
                         <span className="inline-flex items-center rounded-full bg-blue-500 px-2.5 py-0.5 text-xs font-semibold text-white">
@@ -1446,6 +1743,12 @@ export default function DeliveryPage() {
                       <span className="inline-flex items-center rounded-full border border-blue-300 bg-blue-50 px-2.5 py-0.5 text-xs font-semibold text-blue-700">
                         {run.workflow_phase_label}
                       </span>
+                      {mergeInProgress && (
+                        <span className="inline-flex items-center gap-1.5 rounded-full border border-blue-400 bg-blue-100 px-2.5 py-0.5 text-xs font-semibold text-blue-800">
+                          <span className="h-1.5 w-1.5 rounded-full bg-blue-600 animate-pulse" />
+                          {activeDeploymentTarget === "master" ? "Live deployment" : "Staging deployment"} in progress
+                        </span>
+                      )}
                     </div>
                     <p className="text-sm font-medium text-slate-900 truncate mt-0.5">{run.summary}</p>
                   </div>
@@ -1477,9 +1780,9 @@ export default function DeliveryPage() {
               )}
             </div>
           </div>
-          {(loading || preparing) ? (
+          {(loading || preparing || mergeInProgress) ? (
             <div className="h-1 bg-gray-100" aria-hidden="true">
-              <div className="h-full w-1/4 bg-blue-500 animate-pulse" />
+              <div className="h-full w-1/3 bg-blue-500 animate-pulse" />
             </div>
           ) : run ? (
             <div className="h-1 bg-gray-100" aria-hidden="true">
@@ -1491,6 +1794,10 @@ export default function DeliveryPage() {
           ) : null}
         </div>
 
+        <div
+          ref={scrollContainerRef}
+          className="flex-1 min-h-0 overflow-y-auto"
+        >
         <div className={`max-w-5xl mx-auto px-6 py-6 flex flex-col gap-4 ${showActionBar ? "pb-32" : ""}`}>
 
         {loading && (
@@ -1558,113 +1865,96 @@ export default function DeliveryPage() {
           <>
             <div className="bg-white border border-gray-100 rounded-xl shadow-sm px-6 py-5">
               <PipelineStepper
-                steps={[
-                  { number: 1, label: "Estimation", status: step1Status },
-                  { number: 2, label: "Implementation", status: step2Status as "completed" | "active" | "pending" },
-                  { number: 3, label: "Pull Request", status: step3Status as "completed" | "active" | "pending" },
-                  { number: 4, label: "Verification", status: step4Status as "completed" | "active" | "pending" },
-                ]}
+                steps={pipelineSteps}
+                selectedStep={viewStep}
+                maxNavigableStep={maxNavigableStep}
+                onStepSelect={selectViewStep}
               />
             </div>
 
-            {(run.description || run.jira_comments.length > 0) && (
-              prReviewReady ? (
-                <CollapsedStepCard
-                  title="Jira ticket"
-                  summary={`${run.jira_comments.length} comment${run.jira_comments.length === 1 ? "" : "s"} · synced from Jira`}
-                >
-                  <JiraTicketContent run={run} />
-                </CollapsedStepCard>
-              ) : (
-                <section className="bg-white border border-gray-100 rounded-xl shadow-sm overflow-hidden">
-                  <div className="card-header">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <h2 className="card-title">Jira ticket</h2>
-                        {run.jira_synced_at && (
-                          <p className="flex items-center gap-1.5 text-xs text-slate-400 mt-1">
-                            <RefreshIcon className="h-3 w-3" />
-                            Synced {new Date(run.jira_synced_at).toLocaleString()}
-                          </p>
-                        )}
-                      </div>
-                      {run.jira_issue_url && (
-                        <a
-                          href={run.jira_issue_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-sm font-medium text-brand-600 hover:text-brand-700"
-                        >
-                          Open in Jira →
-                        </a>
-                      )}
-                    </div>
+            {(apiOutdated || error || run.error_message || run.workflow_notice) && (
+              <div className="space-y-4">
+                {apiOutdated && (
+                  <div className="alert-error">
+                    Backend API is out of date (estimation endpoints missing). Restart the dev backend with{" "}
+                    <code className="font-mono text-sm">docker compose -f docker-compose.dev.yml up --build backend</code>
+                    {" "}or run <code className="font-mono text-sm">./dev.sh</code>.
                   </div>
-                  <div className="p-6">
-                    <JiraTicketContent run={run} />
+                )}
+                {error && <ErrorBanner message={error} />}
+                {run.error_message && !error && <ErrorBanner message={run.error_message} />}
+                {run.workflow_notice && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                    <p className="font-medium">
+                      {run.workflow_phase === "ready_for_implementation"
+                        ? "Ready to redevelop"
+                        : "Delivery restarted"}
+                    </p>
+                    <p className="mt-1">{run.workflow_notice}</p>
+                    {run.branch_name && run.workflow_phase === "ready_for_implementation" && (
+                      <p className="mt-2 text-xs text-amber-800">
+                        Branch:{" "}
+                        <BranchNameLink
+                          branchName={run.branch_name}
+                          developmentUrl={run.jira_development_url}
+                        />
+                      </p>
+                    )}
                   </div>
-                </section>
-              )
-            )}
-
-            {apiOutdated && (
-              <div className="alert-error mb-4">
-                Backend API is out of date (estimation endpoints missing). Restart the dev backend with{" "}
-                <code className="font-mono text-sm">docker compose -f docker-compose.dev.yml up --build backend</code>
-                {" "}or run <code className="font-mono text-sm">./dev.sh</code>.
-              </div>
-            )}
-
-            {error && (
-              <div className="mb-4">
-                <ErrorBanner message={error} />
-              </div>
-            )}
-            {run.error_message && !error && (
-              <div className="mb-4">
-                <ErrorBanner message={run.error_message} />
-              </div>
-            )}
-            {run.workflow_notice && (
-              <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 mb-4">
-                <p className="font-medium">
-                  {run.workflow_phase === "ready_for_implementation"
-                    ? "Ready to redevelop"
-                    : "Delivery restarted"}
-                </p>
-                <p className="mt-1">{run.workflow_notice}</p>
-                {run.branch_name && run.workflow_phase === "ready_for_implementation" && (
-                  <p className="mt-2 text-xs text-amber-800">
-                    Branch:{" "}
-                    <BranchNameLink
-                      branchName={run.branch_name}
-                      developmentUrl={run.jira_development_url}
-                    />
-                  </p>
                 )}
               </div>
             )}
 
-            {/* Step 1: Estimation */}
-            {estimationPosted && (
-              <DeliveryStepSection step={1}>
-              <CollapsedStepCard
-                title="Estimation"
-                summary={`${run.estimation_hours ?? "?"} hours estimated · Posted to Jira`}
-              >
-                  <SuccessBanner>
-                    <p className="font-medium">Estimation posted to Jira</p>
-                    <p className="mt-0.5">
-                      {run.estimation_hours}h — ticket moved to Estimation Complete.
-                    </p>
-                  </SuccessBanner>
-                </CollapsedStepCard>
-              </DeliveryStepSection>
-            )}
+            {viewStep === 1 && (
+              <div className="space-y-4">
+                {(run.description || run.jira_comments.length > 0) && (
+                  <section className="bg-white border border-gray-100 rounded-xl shadow-sm overflow-hidden">
+                    <div className="card-header">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <h2 className="card-title">Jira ticket</h2>
+                          {run.jira_synced_at && (
+                            <p className="flex items-center gap-1.5 text-xs text-slate-400 mt-1">
+                              <RefreshIcon className="h-3 w-3" />
+                              Synced {new Date(run.jira_synced_at).toLocaleString()}
+                            </p>
+                          )}
+                        </div>
+                        {run.jira_issue_url && (
+                          <a
+                            href={run.jira_issue_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-sm font-medium text-brand-600 hover:text-brand-700"
+                          >
+                            Open in Jira →
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                    <div className="p-6">
+                      <JiraTicketContent run={run} />
+                    </div>
+                  </section>
+                )}
 
-            {!estimationPosted && !prReviewReady && (
-            <DeliveryStepSection step={1}>
-            <section className={`bg-white border border-gray-100 rounded-xl shadow-sm overflow-hidden ${step1Status === "active" ? "border-2 border-brand-400 shadow-brand-md" : ""}`}>
+                {estimationPosted ? (
+                  <section className="bg-white border border-gray-100 rounded-xl shadow-sm overflow-hidden">
+                    <div className="card-header">
+                      <h2 className="card-title">Step 1 — Estimation</h2>
+                      <p className="card-subtitle">Posted to Jira</p>
+                    </div>
+                    <div className="p-6">
+                      <SuccessBanner>
+                        <p className="font-medium">Estimation posted to Jira</p>
+                        <p className="mt-0.5">
+                          {run.estimation_hours}h — ticket moved to Estimation Complete.
+                        </p>
+                      </SuccessBanner>
+                    </div>
+                  </section>
+                ) : (
+                  <section className={`bg-white border border-gray-100 rounded-xl shadow-sm overflow-hidden ${step1Status === "active" ? "border-2 border-brand-400 shadow-brand-md" : ""}`}>
               {step1Status === "active" && (
                 <div className="px-6 py-3 border-b border-slate-100 bg-slate-50/50">
                   <span className="rounded-full bg-brand-100 px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide text-brand-700">
@@ -1816,104 +2106,121 @@ export default function DeliveryPage() {
 
               </div>
             </section>
-            </DeliveryStepSection>
-            )}
-
-            {/* Step 2: Implementation — collapsed when PR review ready */}
-            {prReviewReady && (
-              <DeliveryStepSection step={2}>
-              <CollapsedStepCard title="Implementation" summary={implementationSummary(run)}>
-                  {run.branch_name && (
-                    <p className="text-sm text-slate-600">
-                      Branch:{" "}
-                      <code className="bg-gray-800 text-green-400 rounded px-2 py-0.5 text-xs font-mono">
-                        {run.branch_name}
-                      </code>
-                    </p>
-                  )}
-                  <ImplementationStepsList run={run} />
-                </CollapsedStepCard>
-              </DeliveryStepSection>
-            )}
-
-            {estimationPosted && !prReviewReady && !verificationDone && !localDevelopmentReady && (
-              <DeliveryStepSection step={2}>
-              <section className={`bg-white border border-gray-100 rounded-xl shadow-sm overflow-hidden ${step2Status === "active" ? "border-2 border-brand-400 shadow-brand-md" : ""}`}>
-                {step2Status === "active" && (
-                  <div className="px-6 py-3 border-b border-slate-100 bg-slate-50/50">
-                    <span className="rounded-full bg-brand-100 px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide text-brand-700">
-                      Current Step
-                    </span>
-                    <h2 className="text-lg font-bold text-brand-600 mt-2">Step 2 — Implementation</h2>
-                  </div>
                 )}
-                {step2Status !== "active" && (
-                  <div className="px-6 py-4 border-b border-slate-200/80 bg-gradient-to-b from-slate-50/80 to-white">
-                    <h2 className="card-title">Step 2 — Implementation</h2>
-                    <p className="card-subtitle">
-                      Creates a branch, then pauses for local development before opening pull requests
-                    </p>
-                  </div>
-                )}
-                <div className="p-6 space-y-5">
-                  {implementing || implementationRunning ? (
-                    <>
-                      <p className="text-sm italic text-slate-500 flex items-center gap-2">
-                        <span className="h-4 w-4 rounded-full border-2 border-slate-300 border-t-brand-600 animate-spin flex-shrink-0" />
-                        System is running implementation — generating code and preparing your review…
-                      </p>
-                      {run && <ImplementationStepsList run={run} />}
-                    </>
-                  ) : (
-                    <div className="space-y-2">
-                      <button
-                        onClick={handleStartImplementation}
-                        className="w-full sm:w-auto min-w-48 rounded-lg bg-brand-600 px-6 py-3 text-sm font-semibold text-white shadow-brand hover:bg-brand-700 hover:shadow-brand-md transition-colors"
-                      >
-                        Start implementation
-                      </button>
-                      <p className="text-xs text-slate-500">
-                        Creates a branch and generates code for review. Create pull requests when ready.
-                      </p>
-                    </div>
-                  )}
-                </div>
-              </section>
-              </DeliveryStepSection>
-            )}
-
-            {localDevelopmentReady && run && (
-              <DeliveryStepSection step={2}>
-              <>
-                <CollapsedStepCard title="Implementation setup" summary={implementationSummary(run)}>
-                    {run.branch_name && (
-                      <p className="text-sm text-slate-600">
-                        Branch:{" "}
-                        <code className="bg-gray-800 text-green-400 rounded px-2 py-0.5 text-xs font-mono">
-                          {run.branch_name}
-                        </code>
-                      </p>
-                    )}
-                    <ImplementationStepsList run={run} />
-                  </CollapsedStepCard>
-                <LocalDevelopmentPanel
-                  run={run}
-                  creatingPrs={confirmingLocal}
-                  applyingRevision={applyingRevision}
-                  revisionPrompt={revisionPrompt}
-                  onRevisionPromptChange={setRevisionPrompt}
-                  onApplyRevision={() => void handleApplyRevision()}
-                  disabled={confirmingLocal}
-                  onCreatePrs={() => void handleCreatePrs()}
+                <DeliveryStepNav
+                  viewStep={viewStep}
+                  maxNavigableStep={maxNavigableStep}
+                  onSelect={selectViewStep}
                 />
-              </>
-              </DeliveryStepSection>
+              </div>
             )}
 
-            {/* Steps 3–4: PR review, verification, and actions */}
-            {prReviewReady && !verificationDone && (
-              <>
-                <DeliveryStepSection step={3}>
+            {viewStep === 2 && (
+              <div className="space-y-4">
+                {prReviewReady ? (
+                  <section className="bg-white border border-gray-100 rounded-xl shadow-sm overflow-hidden">
+                    <div className="card-header">
+                      <h2 className="card-title">Step 2 — Implementation</h2>
+                      <p className="card-subtitle">{implementationSummary(run)}</p>
+                    </div>
+                    <div className="p-6 space-y-4">
+                      {run.branch_name && (
+                        <p className="text-sm text-slate-600">
+                          Branch:{" "}
+                          <code className="bg-gray-800 text-green-400 rounded px-2 py-0.5 text-xs font-mono">
+                            {run.branch_name}
+                          </code>
+                        </p>
+                      )}
+                      <ImplementationStepsList run={run} />
+                    </div>
+                  </section>
+                ) : localDevelopmentReady ? (
+                  <>
+                    <section className="bg-white border border-gray-100 rounded-xl shadow-sm overflow-hidden border-2 border-brand-400 shadow-brand-md">
+                      <div className="px-6 py-3 border-b border-slate-100 bg-slate-50/50">
+                        <span className="rounded-full bg-brand-100 px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide text-brand-700">
+                          Current Step
+                        </span>
+                        <h2 className="text-lg font-bold text-brand-600 mt-2">Step 2 — Implementation</h2>
+                        <p className="text-sm text-slate-500 mt-1">{implementationSummary(run)}</p>
+                      </div>
+                      <div className="p-6 space-y-4">
+                        {run.branch_name && (
+                          <p className="text-sm text-slate-600">
+                            Branch:{" "}
+                            <code className="bg-gray-800 text-green-400 rounded px-2 py-0.5 text-xs font-mono">
+                              {run.branch_name}
+                            </code>
+                          </p>
+                        )}
+                        <ImplementationStepsList run={run} />
+                      </div>
+                    </section>
+                    <LocalDevelopmentPanel
+                      run={run}
+                      creatingPrs={confirmingLocal}
+                      applyingRevision={applyingRevision}
+                      revisionPrompt={revisionPrompt}
+                      onRevisionPromptChange={setRevisionPrompt}
+                      onApplyRevision={() => void handleApplyRevision()}
+                      disabled={confirmingLocal}
+                      onCreatePrs={() => void handleCreatePrs()}
+                    />
+                  </>
+                ) : (
+                  <section className={`bg-white border border-gray-100 rounded-xl shadow-sm overflow-hidden ${step2Status === "active" ? "border-2 border-brand-400 shadow-brand-md" : ""}`}>
+                    {step2Status === "active" && (
+                      <div className="px-6 py-3 border-b border-slate-100 bg-slate-50/50">
+                        <span className="rounded-full bg-brand-100 px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide text-brand-700">
+                          Current Step
+                        </span>
+                        <h2 className="text-lg font-bold text-brand-600 mt-2">Step 2 — Implementation</h2>
+                      </div>
+                    )}
+                    {step2Status !== "active" && (
+                      <div className="px-6 py-4 border-b border-slate-200/80 bg-gradient-to-b from-slate-50/80 to-white">
+                        <h2 className="card-title">Step 2 — Implementation</h2>
+                        <p className="card-subtitle">
+                          Creates a branch, then pauses for local development before opening pull requests
+                        </p>
+                      </div>
+                    )}
+                    <div className="p-6 space-y-5">
+                      {implementing || implementationRunning ? (
+                        <>
+                          <p className="text-sm italic text-slate-500 flex items-center gap-2">
+                            <span className="h-4 w-4 rounded-full border-2 border-slate-300 border-t-brand-600 animate-spin flex-shrink-0" />
+                            System is running implementation — generating code and preparing your review…
+                          </p>
+                          <ImplementationStepsList run={run} />
+                        </>
+                      ) : (
+                        <div className="space-y-2">
+                          <button
+                            onClick={handleStartImplementation}
+                            className="w-full sm:w-auto min-w-48 rounded-lg bg-brand-600 px-6 py-3 text-sm font-semibold text-white shadow-brand hover:bg-brand-700 hover:shadow-brand-md transition-colors"
+                          >
+                            Start implementation
+                          </button>
+                          <p className="text-xs text-slate-500">
+                            Creates a branch and generates code for review. Create pull requests when ready.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </section>
+                )}
+                <DeliveryStepNav
+                  viewStep={viewStep}
+                  maxNavigableStep={maxNavigableStep}
+                  onSelect={selectViewStep}
+                />
+              </div>
+            )}
+
+            {viewStep === 3 && prReviewReady && !verificationDone && (
+              <div className="space-y-4">
                 <PullRequestDetailsCard
                   run={run}
                   stagingDeployFailed={
@@ -1928,28 +2235,58 @@ export default function DeliveryPage() {
                   }
                   stagingMergeFailed={mergeFailedTarget === "beta"}
                   liveMergeFailed={mergeFailedTarget === "master"}
+                  deployingTarget={activeDeploymentTarget}
+                  deployDisabled={actionDisabled}
+                  onDeployStaging={canDeployStaging ? () => void handleRunDeployment("beta") : undefined}
+                  onDeployLive={canDeployLive ? () => void handleRunDeployment("master") : undefined}
                 />
-                </DeliveryStepSection>
 
-                <DeliveryStepSection step={4}>
-                <div ref={deploymentRetryRef} className="scroll-mt-24">
-                  <VerificationPanel
-                    run={run}
-                    isActive={step4Status === "active"}
-                    deploymentFailed={deploymentFailed}
-                    mergeFailedTarget={mergeFailedTarget}
-                    deploymentErrorMessage={deploymentErrorMessage}
-                    deploymentFailureDetail={deploymentFailureDetail}
-                    mergeErrorMessage={mergeErrorMessage}
-                    terminalLines={terminalLines}
-                    mergeInProgress={mergeInProgress}
-                    retryingDeployment={retryingDeployment}
-                    retryDisabled={actionDisabled}
-                    showDeployButton={deployOnlyMode}
-                    onRunDeploy={handleRetryDeployment}
-                  />
-                </div>
-                </DeliveryStepSection>
+                {(showStagingLogs || showLiveLogs) && (
+                  <div className="space-y-4">
+                    {showStagingLogs && (
+                      <DeploymentLogsPanel
+                        environment="beta"
+                        deploymentFailed={stagingDeploymentFailed}
+                        mergeFailed={mergeFailedTarget === "beta"}
+                        deploymentErrorMessage={
+                          stagingDeploymentFailed && run ? getDeploymentFailureMessage(run) : null
+                        }
+                        deploymentFailureDetail={
+                          stagingDeploymentFailed && run ? getDeploymentFailureDetail(run) : null
+                        }
+                        mergeErrorMessage={
+                          mergeFailedTarget === "beta" && run
+                            ? getMergeFailureMessage(run, "beta")
+                            : null
+                        }
+                        terminalLines={stagingTerminalLines}
+                        inProgress={stagingInProgress}
+                        retryingDeployment={stagingRetryingDeployment}
+                      />
+                    )}
+                    {showLiveLogs && (
+                      <DeploymentLogsPanel
+                        environment="master"
+                        deploymentFailed={liveDeploymentFailed}
+                        mergeFailed={mergeFailedTarget === "master"}
+                        deploymentErrorMessage={
+                          liveDeploymentFailed && run ? getDeploymentFailureMessage(run) : null
+                        }
+                        deploymentFailureDetail={
+                          liveDeploymentFailed && run ? getDeploymentFailureDetail(run) : null
+                        }
+                        mergeErrorMessage={
+                          mergeFailedTarget === "master" && run
+                            ? getMergeFailureMessage(run, "master")
+                            : null
+                        }
+                        terminalLines={liveTerminalLines}
+                        inProgress={liveInProgress}
+                        retryingDeployment={liveRetryingDeployment}
+                      />
+                    )}
+                  </div>
+                )}
 
                 <ChangedFilesSection
                   files={run.changed_files}
@@ -1969,83 +2306,89 @@ export default function DeliveryPage() {
                   />
                 )}
 
-                {!deployOnlyMode && (run.status === "awaiting_approval" || revisionRunning) && (
+                {showRequestChanges && (
                   <div className="rounded-xl border border-gray-100 bg-white shadow-sm p-4 space-y-3">
-                      <div>
-                        <label className="label mb-1.5" htmlFor="revision-prompt">
-                          Request additional changes
-                        </label>
-                        <p className="text-xs text-slate-500 mb-2">
-                          Describe what to change in the generated code. A new commit will be pushed
-                          to the feature branch and appear on the existing pull requests.
-                        </p>
-                        <textarea
-                          id="revision-prompt"
-                          className="input min-h-[120px] resize-y text-sm leading-relaxed"
-                          value={revisionPrompt}
-                          onChange={(e) => setRevisionPrompt(e.target.value)}
-                          placeholder="e.g. Add error handling to the login form and update the button label to 'Sign in'"
-                          disabled={revisionRunning || merging}
-                        />
-                      </div>
-                      {revisionRunning && (
-                        <div className="space-y-3">
-                          <div className="flex items-center gap-3 text-sm text-slate-600">
-                            <span className="h-5 w-5 rounded-full border-2 border-slate-300 border-t-brand-600 animate-spin" />
-                            <div>
-                              <p className="font-medium">Applying changes to branch…</p>
-                              <p className="text-slate-500 mt-0.5">
-                                Progress updates while commits are generated and pushed
-                              </p>
-                            </div>
-                          </div>
-                          <RevisionStepsList run={run} active />
-                        </div>
-                      )}
-                      <button
-                        onClick={handleApplyRevision}
-                        disabled={revisionRunning || merging || !revisionPrompt.trim()}
-                        className="btn-primary"
-                      >
-                        {revisionRunning ? "Applying changes…" : "Apply changes to branch"}
-                      </button>
+                    <div>
+                      <label className="label mb-1.5" htmlFor="revision-prompt">
+                        Request additional changes
+                      </label>
+                      <p className="text-xs text-slate-500 mb-2">
+                        Describe what to change in the generated code. A new commit will be pushed
+                        to the feature branch and appear on the existing pull requests.
+                      </p>
+                      <textarea
+                        id="revision-prompt"
+                        className="input min-h-[120px] resize-y text-sm leading-relaxed"
+                        value={revisionPrompt}
+                        onChange={(e) => setRevisionPrompt(e.target.value)}
+                        placeholder="e.g. Add error handling to the login form and update the button label to 'Sign in'"
+                        disabled={revisionInProgress || merging}
+                      />
                     </div>
-                  )}
-
-                <RevisionHistory stepsLog={run.steps_log} />
-
-                {run.status === "awaiting_approval" && !deployOnlyMode && (
-                  <div className="rounded-xl border border-slate-200/80 bg-white p-4 space-y-3">
-                    <label className="label mb-1.5" htmlFor="decline-reason">
-                      Restart notes (optional)
-                    </label>
-                    <textarea
-                      id="decline-reason"
-                      className="input min-h-[80px] resize-y text-sm leading-relaxed"
-                      value={declineReason}
-                      onChange={(e) => setDeclineReason(e.target.value)}
-                      placeholder="Why are you declining? This is posted to Bitbucket and Jira."
-                      disabled={decliningPr || merging || applyingRevision || revisionRunning}
-                    />
+                    {revisionInProgress && (
+                      <div className="space-y-3">
+                        <div className="flex items-center gap-3 text-sm text-slate-600">
+                          <span className="h-5 w-5 rounded-full border-2 border-slate-300 border-t-brand-600 animate-spin" />
+                          <div>
+                            <p className="font-medium">Applying your requested changes…</p>
+                            <p className="text-slate-500 mt-0.5">
+                              Progress updates while commits are generated and pushed
+                            </p>
+                          </div>
+                        </div>
+                        <RevisionStepsList run={run} active />
+                      </div>
+                    )}
+                    <button
+                      onClick={handleApplyRevision}
+                      disabled={revisionInProgress || merging || !revisionPrompt.trim()}
+                      className="btn-primary"
+                    >
+                      {revisionInProgress ? "Applying changes…" : "Apply changes to branch"}
+                    </button>
                   </div>
                 )}
 
-                {run.status === "awaiting_approval" && (
-                  <DangerZone>
+                <RevisionHistory stepsLog={run.steps_log} />
+
+                {showRestartDevelopment && (
+                  <div className="rounded-xl border border-slate-200/80 bg-white shadow-sm p-4 space-y-3">
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-900">Restart development</h3>
+                      <p className="text-xs text-slate-500 mt-1">
+                        Close open pull requests and regenerate code from scratch. You will be asked to
+                        confirm before anything changes.
+                      </p>
+                    </div>
+                    <div>
+                      <label className="label mb-1.5" htmlFor="decline-reason">
+                        Notes (optional)
+                      </label>
+                      <textarea
+                        id="decline-reason"
+                        className="input min-h-[80px] resize-y text-sm leading-relaxed"
+                        value={declineReason}
+                        onChange={(e) => setDeclineReason(e.target.value)}
+                        placeholder="Why are you restarting? This is posted to Bitbucket and Jira."
+                        disabled={decliningPr || merging || applyingRevision || revisionInProgress}
+                      />
+                    </div>
                     <button
                       type="button"
                       onClick={() => setDeclineConfirmOpen(true)}
                       disabled={actionDisabled || applyingRevision}
-                      className="rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50 transition-colors"
-                      title="Are you sure? This closes PRs and regenerates code."
+                      className="btn-secondary text-red-600 hover:bg-red-50 hover:border-red-200"
                     >
-                      {decliningPr ? "Restarting…" : "Restart Development"}
+                      {decliningPr ? "Restarting…" : "Restart development"}
                     </button>
-                    <p className="text-xs text-slate-500 mt-2">
-                      Are you sure? This closes PRs and regenerates code.
-                    </p>
-                  </DangerZone>
+                  </div>
                 )}
+
+                <DeliveryStepNav
+                  viewStep={viewStep}
+                  maxNavigableStep={maxNavigableStep}
+                  onSelect={selectViewStep}
+                />
 
                 <DeliveryActionBar
                   left={
@@ -2078,7 +2421,7 @@ export default function DeliveryPage() {
                     deploymentFailed && run.status === "awaiting_approval" && !retryingDeployment ? (
                       <button
                         type="button"
-                        onClick={handleRetryDeployment}
+                        onClick={() => void handleRunDeployment((run.pending_deploy_retry as "beta" | "master") ?? "beta")}
                         disabled={actionDisabled || retryingDeployment}
                         className="inline-flex items-center gap-2 max-w-xs rounded-lg bg-blue-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
                       >
@@ -2115,54 +2458,71 @@ export default function DeliveryPage() {
                     ) : null
                   }
                 />
-              </>
+              </div>
             )}
 
-            {/* Step 4: Website verification */}
-            {verificationDone && (
-              <DeliveryStepSection step={4}>
-              <section className="bg-white border-2 border-brand-400 rounded-xl shadow-brand-md p-6">
-                <div className="flex items-center gap-2 mb-4">
-                  <span className="rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide text-green-700">
-                    Complete
-                  </span>
-                  <h2 className="text-lg font-bold text-slate-900">Step 4 — Verification</h2>
-                </div>
-                  {(run.verifications ?? []).length > 0 ? (
-                    <ul className="rounded-xl border border-slate-200 divide-y divide-slate-100 overflow-hidden">
-                      {(run.verifications ?? []).map((item) => (
-                        <li key={item.environment} className="px-4 py-3 text-sm">
-                          <div className="flex items-center justify-between gap-3 mb-1">
-                            <span className="font-medium text-slate-800">{item.environment}</span>
-                            <span className={item.passed ? "badge-success" : "badge-neutral"}>
-                              {item.passed ? "Passed" : "Needs review"}
-                            </span>
-                          </div>
-                          <p className="text-slate-600 break-all">{item.url}</p>
-                          <p className="text-slate-700 mt-1">{item.summary}</p>
-                          {item.screenshot_filename && (
-                            <p className="text-xs text-slate-500 mt-1">
-                              Screenshot attached in Jira: {item.screenshot_filename}
-                            </p>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="text-sm text-slate-500">No verification results recorded.</p>
-                  )}
+            {viewStep === 4 && (
+              <div className="space-y-4">
+                {verificationDone ? (
+                  <section className="bg-white border-2 border-brand-400 rounded-xl shadow-brand-md p-6">
+                    <div className="flex items-center gap-2 mb-4">
+                      <span className="rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide text-green-700">
+                        Complete
+                      </span>
+                      <h2 className="text-lg font-bold text-slate-900">Step 4 — Verification</h2>
+                    </div>
+                    {(run.verifications ?? []).length > 0 ? (
+                      <ul className="rounded-xl border border-slate-200 divide-y divide-slate-100 overflow-hidden">
+                        {(run.verifications ?? []).map((item) => (
+                          <li key={item.environment} className="px-4 py-3 text-sm">
+                            <div className="flex items-center justify-between gap-3 mb-1">
+                              <span className="font-medium text-slate-800">{item.environment}</span>
+                              <span className={item.passed ? "badge-success" : "badge-neutral"}>
+                                {item.passed ? "Passed" : "Needs review"}
+                              </span>
+                            </div>
+                            <p className="text-slate-600 break-all">{item.url}</p>
+                            <p className="text-slate-700 mt-1">{item.summary}</p>
+                            {item.screenshot_filename && (
+                              <p className="text-xs text-slate-500 mt-1">
+                                Screenshot attached in Jira: {item.screenshot_filename}
+                              </p>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-sm text-slate-500">No verification results recorded.</p>
+                    )}
 
-                  <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
-                    <p className="font-medium">Delivery complete — In Testing</p>
-                    <p className="mt-1">
-                      Pull request merged, websites verified, and Jira updated with testing screenshots.
-                    </p>
-                  </div>
-              </section>
-              </DeliveryStepSection>
+                    <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900 mt-4">
+                      <p className="font-medium">Delivery complete — In Testing</p>
+                      <p className="mt-1">
+                        Pull request merged, websites verified, and Jira updated with testing screenshots.
+                      </p>
+                    </div>
+                  </section>
+                ) : prReviewReady ? (
+                  <VerificationPanel
+                    run={run}
+                    isActive={step4Status === "active"}
+                    retryDisabled={actionDisabled}
+                    retryingDeployment={retryingDeployment}
+                    mergeInProgress={mergeInProgress}
+                    onPostVerification={(comment) => void handlePostVerification(comment)}
+                    postingVerification={postingVerification}
+                  />
+                ) : null}
+                <DeliveryStepNav
+                  viewStep={viewStep}
+                  maxNavigableStep={maxNavigableStep}
+                  onSelect={selectViewStep}
+                />
+              </div>
             )}
           </>
         )}
+        </div>
         </div>
       </div>
     </Layout>

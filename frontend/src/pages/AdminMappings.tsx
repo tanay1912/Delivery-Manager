@@ -1,6 +1,7 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api, ApiError, Mapping, MappingInput, Project, User } from "../api/client";
+import AdminNav from "../components/AdminNav";
 import Layout from "../components/Layout";
 import { useToast } from "../context/ToastContext";
 
@@ -119,6 +120,25 @@ function PencilIcon({ className = "h-4 w-4" }: { className?: string }) {
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
     </svg>
   );
+}
+
+function ExternalLinkIcon({ className = "h-3 w-3" }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth={2}
+        d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25"
+      />
+    </svg>
+  );
+}
+
+function websiteHref(url: string): string {
+  const trimmed = url.trim();
+  if (!trimmed) return "#";
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
 }
 
 function SettingsIcon({ className = "h-4 w-4" }: { className?: string }) {
@@ -477,7 +497,9 @@ export default function AdminMappings() {
 
   return (
     <Layout user={user} siteName={siteName} onLogout={handleLogout}>
-      <div className="w-full px-4 sm:px-6 lg:px-8 py-6 h-[calc(100vh-4rem)] flex flex-col">
+      <div className="w-full px-4 sm:px-6 lg:px-8 py-6 flex flex-col lg:h-[calc(100vh-3.5rem)] lg:min-h-0">
+        <AdminNav />
+
         {error && (
           <div className="alert-error mb-4 flex-shrink-0 flex items-start gap-3">
             <svg className="h-5 w-5 flex-shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
@@ -491,8 +513,8 @@ export default function AdminMappings() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-5 lg:gap-6 flex-1 min-h-0">
-          <aside className="lg:col-span-1 flex flex-col min-h-0">
+        <div className="flex flex-col lg:flex-row gap-5 lg:gap-6 lg:flex-1 lg:min-h-0">
+          <aside className="lg:w-72 xl:w-80 flex-shrink-0 flex flex-col min-h-0 max-lg:max-h-[min(24rem,40vh)]">
             <div className="card overflow-hidden flex flex-col h-full min-h-0 bg-slate-50/70 border-r border-slate-200/90">
               <div className="card-header flex-shrink-0">
                 <h2 className="card-title">All Jira projects</h2>
@@ -589,7 +611,7 @@ export default function AdminMappings() {
             </div>
           </aside>
 
-          <section className="lg:col-span-4 flex flex-col min-h-0 gap-4">
+          <section className="flex-1 min-w-0 flex flex-col min-h-0 gap-4">
             {!selectedProjectKey && (
             <div className="card overflow-hidden flex flex-col flex-1 min-h-0">
               <div className="card-header flex items-center justify-between flex-shrink-0">
@@ -606,9 +628,9 @@ export default function AdminMappings() {
                 )}
               </div>
               {loading ? (
-                <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="p-4 sm:p-6 space-y-3">
                   {[...Array(4)].map((_, i) => (
-                    <div key={i} className="h-32 skeleton" />
+                    <div key={i} className="h-20 skeleton rounded-xl" />
                   ))}
                 </div>
               ) : mappings.length === 0 ? (
@@ -640,7 +662,7 @@ export default function AdminMappings() {
                   </button>
                 </div>
               ) : (
-                <div className="flex-1 min-h-0 overflow-auto p-4 sm:p-6 grid grid-cols-1 md:grid-cols-2 gap-3 items-start content-start">
+                <div className="flex-1 min-h-0 overflow-auto p-4 sm:p-6 space-y-3">
                   {mappings.map((mapping) => {
                     const mappingKey = normalizeProjectKey(mapping.jira_project_key);
                     const project = allProjects.find(
@@ -650,20 +672,22 @@ export default function AdminMappings() {
                     return (
                       <div
                         key={mapping.id}
-                        className={`relative rounded-xl border p-4 transition-all hover:shadow-card-hover ${
+                        className={`relative rounded-xl border px-4 py-3 sm:px-5 sm:py-4 transition-all hover:shadow-card-hover ${
                           isSelected
                             ? "border-brand-300 bg-slate-50/50 ring-1 ring-brand-200/70"
                             : "border-slate-200/80 bg-white hover:border-brand-200"
                         }`}
                       >
-                        <div className="flex flex-col gap-3">
-                          <div className="min-w-0 flex items-center gap-3">
+                        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-6">
+                          <div className="min-w-0 flex items-center gap-3 sm:flex-[1.1]">
                             <ProjectAvatar
                               project={project ?? { key: mapping.jira_project_key }}
                               size="sm"
                             />
                             <div className="min-w-0">
-                              <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">Jira project</p>
+                              <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                                Jira project
+                              </p>
                               <p className="font-mono font-semibold text-slate-900">{mapping.jira_project_key}</p>
                               {project && (
                                 <p className="text-xs text-slate-500 truncate">{project.name}</p>
@@ -671,8 +695,10 @@ export default function AdminMappings() {
                             </div>
                           </div>
 
-                          <div className="min-w-0 border-t border-slate-100 pt-3">
-                            <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">Git repo</p>
+                          <div className="min-w-0 sm:flex-[1.4] sm:border-l sm:border-slate-100 sm:pl-6">
+                            <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                              Git repo
+                            </p>
                             <p className="font-mono text-sm text-slate-800 truncate">
                               <span className="text-slate-400">{mapping.bitbucket_workspace}/</span>
                               {mapping.bitbucket_repo_slug}
@@ -687,7 +713,39 @@ export default function AdminMappings() {
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-2 pt-1 border-t border-slate-100">
+                          <div className="min-w-0 sm:flex-1 sm:border-l sm:border-slate-100 sm:pl-6">
+                            <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                              Websites
+                            </p>
+                            <div className="flex flex-wrap gap-2 mt-1.5">
+                              {mapping.beta_website_url.trim() && (
+                                <a
+                                  href={websiteHref(mapping.beta_website_url)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  title={mapping.beta_website_url}
+                                  className="btn-secondary btn-sm inline-flex items-center gap-1.5"
+                                >
+                                  Stage
+                                  <ExternalLinkIcon />
+                                </a>
+                              )}
+                              {mapping.master_website_url.trim() && (
+                                <a
+                                  href={websiteHref(mapping.master_website_url)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  title={mapping.master_website_url}
+                                  className="btn-secondary btn-sm inline-flex items-center gap-1.5"
+                                >
+                                  Live
+                                  <ExternalLinkIcon />
+                                </a>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 sm:flex-shrink-0 sm:ml-auto sm:border-l sm:border-slate-100 sm:pl-6">
                             <button
                               type="button"
                               onClick={() => handleEdit(mapping)}

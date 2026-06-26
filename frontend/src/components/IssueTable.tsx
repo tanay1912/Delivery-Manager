@@ -1,4 +1,5 @@
 import { Issue } from "../api/client";
+import IssueTypeIcon from "./IssueTypeIcon";
 import { formatFullDate, formatRelativeTime } from "../utils/relativeTime";
 
 interface IssueTableProps {
@@ -159,14 +160,17 @@ export default function IssueTable({
                 }`}
               >
                 <td className="px-6 py-3.5 border-b border-slate-100">
-                  <a
-                    href={siteUrl ? `${siteUrl}/browse/${issue.key}` : `#`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="font-mono text-sm font-medium text-blue-600 hover:text-blue-800 transition-colors"
-                  >
-                    {issue.key}
-                  </a>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <IssueTypeIcon name={issue.issue_type} iconUrl={issue.issue_type_icon} />
+                    <a
+                      href={siteUrl ? `${siteUrl}/browse/${issue.key}` : `#`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-mono text-sm font-medium text-blue-600 hover:text-blue-800 transition-colors truncate"
+                    >
+                      {issue.key}
+                    </a>
+                  </div>
                 </td>
                 <td className="px-6 py-3.5 max-w-xs border-b border-slate-100">
                   <span className="block truncate text-slate-800 font-normal" title={issue.summary}>

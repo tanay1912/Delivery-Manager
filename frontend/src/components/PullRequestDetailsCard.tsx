@@ -15,19 +15,32 @@ interface PullRequestDetailsCardProps {
   liveDeployFailed: boolean;
   stagingMergeFailed: boolean;
   liveMergeFailed: boolean;
+  deployingTarget?: "beta" | "master" | null;
+  deployDisabled?: boolean;
+  onDeployStaging?: () => void;
+  onDeployLive?: () => void;
 }
 
-type PrStatusVariant = "failed" | "success" | "neutral";
+type PrStatusVariant = "failed" | "success" | "neutral" | "progress";
 
 function resolvePrStatus(
   hasPr: boolean,
   merged: boolean,
   deployFailed: boolean,
   mergeFailed: boolean,
-): { label: string; emoji: string; variant: PrStatusVariant } | null {
+  isDeploying: boolean,
+): { label: string; emoji: string; variant: PrStatusVariant; showSpinner?: boolean } | null {
   if (!hasPr) return null;
   if (mergeFailed) return { label: "Merge conflict", emoji: "❌", variant: "failed" };
   if (deployFailed) return { label: "Deployment Failed", emoji: "❌", variant: "failed" };
+  if (isDeploying) {
+    return {
+      label: merged ? "Deploying" : "Merging & deploying",
+      emoji: "",
+      variant: "progress",
+      showSpinner: true,
+    };
+  }
   if (merged) return { label: "Merged", emoji: "✅", variant: "success" };
   return { label: "Open", emoji: "✅", variant: "success" };
 }
@@ -41,6 +54,10 @@ const statusStyles: Record<PrStatusVariant, { card: string; status: string }> = 
     card: "border-l-4 border-green-500",
     status: "bg-green-50 border border-green-200 text-green-800",
   },
+  progress: {
+    card: "border-l-4 border-blue-500",
+    status: "bg-blue-50 border border-blue-200 text-blue-800",
+  },
   neutral: {
     card: "border-l-4 border-gray-300",
     status: "bg-gray-50 border border-gray-200 text-gray-700",
@@ -51,10 +68,18 @@ function PrCard({
   title,
   prUrl,
   status,
+  merged,
+  isDeploying,
+  deployDisabled,
+  onDeploy,
 }: {
   title: string;
   prUrl: string | null | undefined;
   status: ReturnType<typeof resolvePrStatus>;
+  merged: boolean;
+  isDeploying: boolean;
+  deployDisabled: boolean;
+  onDeploy?: () => void;
 }) {
   if (!prUrl && !status) return null;
 
@@ -66,15 +91,27 @@ function PrCard({
       <div className="p-4 flex-1">
         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-3">{title}</p>
         {prUrl ? (
-          <a
-            href={prUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-gray-50 transition-colors"
-          >
-            View PR
-            <ExternalLinkIcon />
-          </a>
+          <div className="space-y-2">
+            <a
+              href={prUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-gray-50 transition-colors"
+            >
+              View PR
+              <ExternalLinkIcon />
+            </a>
+            {merged && onDeploy && (
+              <button
+                type="button"
+                onClick={onDeploy}
+                disabled={deployDisabled || isDeploying}
+                className="block w-full sm:w-auto rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
+              >
+                {isDeploying ? "Deploying…" : "Deploy Now"}
+              </button>
+            )}
+          </div>
         ) : (
           <span className="text-sm text-slate-400">—</span>
         )}
@@ -82,8 +119,12 @@ function PrCard({
       {status && (
         <div className={`px-4 py-3 text-sm mt-auto -mx-px -mb-px rounded-b-xl ${styles.status}`}>
           <span className="font-medium text-slate-600">Status:</span>{" "}
-          <span className="font-semibold">
-            {status.emoji} {status.label}
+          <span className="font-semibold inline-flex items-center gap-1.5">
+            {status.showSpinner && (
+              <span className="h-3.5 w-3.5 rounded-full border-2 border-blue-300 border-t-blue-600 animate-spin flex-shrink-0" />
+            )}
+            {status.emoji ? `${status.emoji} ` : ""}
+            {status.label}
           </span>
         </div>
       )}
@@ -121,6 +162,10 @@ export default function PullRequestDetailsCard({
   liveDeployFailed,
   stagingMergeFailed,
   liveMergeFailed,
+  deployingTarget = null,
+  deployDisabled = false,
+  onDeployStaging,
+  onDeployLive,
 }: PullRequestDetailsCardProps) {
   const stagingUrl = run.beta_pr_url || run.pr_url;
   const hasAnyPr = Boolean(run.branch_name || stagingUrl || run.master_pr_url);
@@ -132,12 +177,14 @@ export default function PullRequestDetailsCard({
     run.beta_merged,
     stagingDeployFailed,
     stagingMergeFailed,
+    deployingTarget === "beta",
   );
   const liveStatus = resolvePrStatus(
     Boolean(run.master_pr_id),
     run.master_merged,
     liveDeployFailed,
     liveMergeFailed,
+    deployingTarget === "master",
   );
 
   return (
@@ -158,8 +205,24 @@ export default function PullRequestDetailsCard({
       )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <PrCard title="Staging PR" prUrl={stagingUrl} status={stagingStatus} />
-        <PrCard title="Live PR" prUrl={run.master_pr_url} status={liveStatus} />
+        <PrCard
+          title="Staging PR"
+          prUrl={stagingUrl}
+          status={stagingStatus}
+          merged={run.beta_merged}
+          isDeploying={deployingTarget === "beta"}
+          deployDisabled={deployDisabled}
+          onDeploy={onDeployStaging}
+        />
+        <PrCard
+          title="Live PR"
+          prUrl={run.master_pr_url}
+          status={liveStatus}
+          merged={run.master_merged}
+          isDeploying={deployingTarget === "master"}
+          deployDisabled={deployDisabled}
+          onDeploy={onDeployLive}
+        />
       </div>
     </div>
   );

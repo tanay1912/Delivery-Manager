@@ -93,27 +93,11 @@ export default function IssueSummary({ summary, loading, projectLabel }: IssueSu
     { label: "Done", value: summary?.done ?? 0 },
   ];
 
-  const percent =
-    summary && summary.total > 0 ? Math.round((summary.done / summary.total) * 100) : 0;
-
   return (
     <div className="flex-shrink-0 mb-8">
       <div className="mb-4">
-        <div className="flex items-baseline justify-between gap-4 mb-3">
-          <div>
-            <h2 className="text-lg font-semibold text-slate-900 tracking-tight">Ticket summary</h2>
-            <p className="text-sm text-slate-500 mt-0.5 font-normal">{projectLabel}</p>
-          </div>
-          <span className="text-sm font-semibold text-slate-600 tabular-nums flex-shrink-0">
-            {loading ? "—" : `${percent}%`} completed
-          </span>
-        </div>
-        <div className="h-1.5 w-full rounded-full bg-slate-200 overflow-hidden">
-          <div
-            className="h-full rounded-full bg-gradient-to-r from-brand-500 via-brand-600 to-emerald-500 transition-all duration-700 ease-out"
-            style={{ width: loading ? "0%" : `${percent}%` }}
-          />
-        </div>
+        <h2 className="text-lg font-semibold text-slate-900 tracking-tight">Ticket summary</h2>
+        <p className="text-sm text-slate-500 mt-0.5 font-normal">{projectLabel}</p>
       </div>
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         {stats.map((stat) => (

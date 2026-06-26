@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { JiraComment } from "../api/client";
-import LinkifiedText from "./LinkifiedText";
+import JiraRichText from "./JiraRichText";
 
 const COLLAPSIBLE_HEADERS = ["Development Plan:", "Test Cases:", "Reasoning:"];
 const INFO_LABELS = ["Story points:", "Original estimate:"];
@@ -133,7 +133,7 @@ function CollapsibleSection({ label, content }: { label: string; content: string
       </button>
       {open && (
         <p className="mt-2 text-sm text-slate-600 whitespace-pre-wrap break-words leading-relaxed pl-5">
-          <LinkifiedText text={content} />
+          <JiraRichText text={content} />
         </p>
       )}
     </div>
@@ -186,7 +186,7 @@ function CommentBody({ body }: { body: string }) {
         if (section.type === "text" && section.content) {
           return (
             <p key={idx} className="text-sm text-slate-700 whitespace-pre-wrap break-words leading-relaxed">
-              <LinkifiedText text={section.content} />
+              <JiraRichText text={section.content} />
             </p>
           );
         }

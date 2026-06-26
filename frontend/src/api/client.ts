@@ -103,6 +103,8 @@ export interface Issue {
   updated?: string;
   project_key?: string;
   project_name?: string;
+  issue_type?: string;
+  issue_type_icon?: string;
 }
 
 export interface IssuesResponse {
@@ -175,6 +177,48 @@ export interface MappingsResponse {
   mappings: Mapping[];
 }
 
+export interface AdminDatabaseSettings {
+  jira_impact_analysis_field: string;
+  jira_unit_testing_field: string;
+  jira_admin_database_field: string;
+  jira_impact_analysis_field_name: string;
+  jira_unit_testing_field_name: string;
+  jira_admin_database_field_name: string;
+  env_jira_impact_analysis_field: string;
+  env_jira_unit_testing_field: string;
+  env_jira_admin_database_field: string;
+  jira_fields_cache_total: number;
+  jira_fields_cached_at: string | null;
+  updated_at: string | null;
+}
+
+export interface AdminDatabaseSettingsInput {
+  jira_impact_analysis_field: string;
+  jira_unit_testing_field: string;
+  jira_admin_database_field: string;
+}
+
+export interface JiraFieldItem {
+  id: string;
+  name: string;
+  custom: boolean;
+  schema_type?: string | null;
+  clause_names?: string[];
+}
+
+export interface JiraFieldsResponse {
+  fields: JiraFieldItem[];
+  total: number;
+  cached_at?: string | null;
+  source?: string;
+}
+
+export interface SyncJiraFieldsResponse {
+  fields: JiraFieldItem[];
+  total: number;
+  cached_at: string | null;
+}
+
 export interface RunStepLog {
   step: string;
   status: string;
@@ -218,6 +262,17 @@ export interface WebsiteVerification {
   screenshot_filename?: string | null;
 }
 
+export interface PendingWebsiteVerification {
+  environment: string;
+  url: string;
+  passed: boolean;
+  summary: string;
+  findings: string[];
+  draft_comment: string;
+  screenshot_filename?: string | null;
+  admin_paths?: string[];
+}
+
 export interface DeploymentCommand {
   index: number;
   command: string;
@@ -251,6 +306,8 @@ export interface DeliveryRun {
   workflow_phase_label: string;
   ui_active_step: number;
   jira_status: string | null;
+  issue_type: string | null;
+  issue_type_icon: string | null;
   current_step: string | null;
   next_step: string | null;
   next_step_label: string | null;
@@ -283,12 +340,17 @@ export interface DeliveryRun {
   live_deploy_commands: string[];
   deployment_history: DeploymentAttempt[];
   verifications: WebsiteVerification[];
+  pending_verification: PendingWebsiteVerification | null;
   error_message: string | null;
   workflow_notice: string | null;
   jira_issue_url: string | null;
   jira_development_url: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface RunListResponse {
+  runs: DeliveryRun[];
 }
 
 export interface HealthResponse {
@@ -443,6 +505,24 @@ export const api = {
     request<Mapping>(`/api/mappings/${id}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteMapping: (id: string) =>
     request<void>(`/api/mappings/${id}`, { method: "DELETE" }),
+  getAdminDatabaseSettings: () => request<AdminDatabaseSettings>("/api/admin/database"),
+  updateAdminDatabaseSettings: (body: AdminDatabaseSettingsInput) =>
+    request<AdminDatabaseSettings>("/api/admin/database", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  syncJiraFieldsCache: () =>
+    request<SyncJiraFieldsResponse>("/api/admin/database/sync-jira-fields", {
+      method: "POST",
+    }),
+  getJiraFields: (query = "", customOnly = true, refresh = false) => {
+    const params = new URLSearchParams();
+    if (query.trim()) params.set("q", query.trim());
+    params.set("custom_only", String(customOnly));
+    if (refresh) params.set("refresh", "true");
+    const suffix = params.toString();
+    return request<JiraFieldsResponse>(`/api/jira/fields${suffix ? `?${suffix}` : ""}`);
+  },
   startRun: (issueKey: string) =>
     request<DeliveryRun>("/api/runs", {
       method: "POST",
@@ -450,6 +530,14 @@ export const api = {
     }),
   getRunByIssue: (issueKey: string) =>
     request<DeliveryRun>(`/api/runs/by-issue/${encodeURIComponent(issueKey)}`),
+  listRuns: (params?: { issueKey?: string; projectKey?: string; limit?: number }) => {
+    const search = new URLSearchParams();
+    if (params?.issueKey) search.set("issue_key", params.issueKey);
+    if (params?.projectKey) search.set("project_key", params.projectKey);
+    if (params?.limit) search.set("limit", String(params.limit));
+    const query = search.toString();
+    return request<RunListResponse>(`/api/runs${query ? `?${query}` : ""}`);
+  },
   getRun: (id: string) => request<DeliveryRun>(`/api/runs/${id}`),
   reloadJira: (id: string) =>
     request<DeliveryRun>(`/api/runs/${id}/reload-jira`, { method: "POST" }),
@@ -482,6 +570,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify(target ? { target } : {}),
     }),
+  postVerification: (id: string, comment: string) =>
+    request<DeliveryRun>(`/api/runs/${id}/post-verification`, {
+      method: "POST",
+      body: JSON.stringify({ comment }),
+    }),
+  verificationScreenshotUrl: (id: string, environment: string) =>
+    `/api/runs/${id}/verification-screenshot?environment=${encodeURIComponent(environment)}`,
+  jiraAttachmentUrl: (attachmentId: string) => `/api/runs/jira-attachment/${encodeURIComponent(attachmentId)}`,
   applyRevision: (id: string, prompt: string) =>
     request<DeliveryRun>(`/api/runs/${id}/apply-revision`, {
       method: "POST",

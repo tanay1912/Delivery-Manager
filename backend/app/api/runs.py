@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +18,7 @@ from app.schemas.runs import (
     DeliveryRunResponse,
     FileDiffResponse,
     PostEstimationRequest,
+    PostVerificationRequest,
     RequestInfoRequest,
     RetryDeploymentRequest,
     RunListResponse,
@@ -38,6 +40,7 @@ from app.services.delivery_pipeline import (
     has_pending_post_merge_work,
     merge_pr_target,
     post_estimation,
+    post_website_verification,
     prepare_estimation,
     request_info,
     reset_run_to_estimation,
@@ -48,6 +51,7 @@ from app.services.delivery_pipeline import (
     start_implementation,
     sync_pr_review_state,
     sync_jira_workflow_state,
+    verification_screenshot_file,
     _fetch_issue_snapshot,
 )
 
@@ -131,6 +135,8 @@ def _apply_issue_to_run(run: DeliveryRun, snapshot: dict) -> None:
     ctx["summary"] = snapshot["summary"]
     ctx["description"] = snapshot["description"]
     ctx["status_name"] = snapshot["status_name"]
+    ctx["issue_type"] = snapshot.get("issue_type") or ""
+    ctx["issue_type_icon"] = snapshot.get("issue_type_icon") or ""
     ctx["jira_comments"] = snapshot["jira_comments"]
     run.context_data = ctx
 
@@ -195,6 +201,8 @@ async def start_run(
                     "summary": snapshot["summary"],
                     "description": snapshot["description"],
                     "status_name": snapshot["status_name"],
+                    "issue_type": snapshot.get("issue_type") or "",
+                    "issue_type_icon": snapshot.get("issue_type_icon") or "",
                     "jira_comments": snapshot["jira_comments"],
                     "jira_synced_at": synced_at,
                 },
@@ -423,13 +431,17 @@ async def get_run(
 @router.get("", response_model=RunListResponse)
 async def list_runs(
     issue_key: str | None = Query(None),
+    project_key: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=100),
     session: dict = Depends(require_auth),
     db: AsyncSession = Depends(get_db),
 ):
-    query = select(DeliveryRun).order_by(DeliveryRun.created_at.desc())
+    query = select(DeliveryRun).order_by(DeliveryRun.updated_at.desc())
     if issue_key:
         query = query.where(DeliveryRun.jira_issue_key == issue_key.strip().upper())
-    result = await db.execute(query.limit(20))
+    if project_key:
+        query = query.where(DeliveryRun.project_key == project_key.strip().upper())
+    result = await db.execute(query.limit(limit))
     runs = list(result.scalars().all())
     responses = [await _run_response(run, session, db) for run in runs]
     return RunListResponse(runs=responses)
@@ -552,6 +564,57 @@ async def retry_run_deployment(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return await _run_response(run, session, db)
+
+
+@router.post("/{run_id}/post-verification", response_model=DeliveryRunResponse)
+async def post_run_verification(
+    run_id: uuid.UUID,
+    body: PostVerificationRequest,
+    session: dict = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    run = await db.get(DeliveryRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    try:
+        run = await post_website_verification(db, run, session, body.comment)
+    except PipelineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await _run_response(run, session, db)
+
+
+@router.get("/{run_id}/verification-screenshot")
+async def get_verification_screenshot(
+    run_id: uuid.UUID,
+    environment: str = Query(..., min_length=2),
+    session: dict = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    run = await db.get(DeliveryRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    screenshot = verification_screenshot_file(run_id, environment)
+    if screenshot is None:
+        raise HTTPException(status_code=404, detail="Verification screenshot not found")
+
+    return FileResponse(screenshot, media_type="image/png")
+
+
+@router.get("/jira-attachment/{attachment_id}")
+async def get_jira_attachment(
+    attachment_id: str,
+    session: dict = Depends(require_auth),
+):
+    jira = jira_client_from_session(session)
+    try:
+        content, content_type = await jira.fetch_attachment_content(attachment_id)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=404, detail="Attachment not found") from exc
+
+    return Response(content=content, media_type=content_type)
 
 
 @router.post("/{run_id}/decline-pr", response_model=DeliveryRunResponse)

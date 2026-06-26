@@ -2,6 +2,7 @@ import { Link, useLocation } from "react-router-dom";
 
 const MOBILE_NAV = [
   { to: "/dashboard", label: "Tickets", match: (p: string) => p === "/dashboard" },
+  { to: "/history", label: "History", match: (p: string) => p === "/history" },
   { to: "/admin/mappings", label: "Mappings", match: (p: string) => p.startsWith("/admin") },
   { to: "/settings", label: "Settings", match: (p: string) => p.startsWith("/settings") },
 ];
@@ -23,7 +24,7 @@ export default function MobileNav() {
               to={item.to}
               className={`rounded-lg px-3.5 py-2 text-sm font-medium whitespace-nowrap transition-colors ${
                 active
-                  ? "bg-blue-50 text-blue-700 ring-1 ring-blue-200/60"
+                  ? "bg-brand-50 text-brand-700 ring-1 ring-brand-200/60"
                   : "text-slate-600 hover:bg-slate-50"
               }`}
             >

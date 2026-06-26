@@ -16,6 +16,7 @@ def _format_issue(issue: dict) -> dict:
     priority = fields.get("priority") or {}
     assignee = fields.get("assignee") or {}
     project = fields.get("project") or {}
+    issue_type = fields.get("issuetype") or {}
     return {
         "id": issue.get("id"),
         "key": issue.get("key"),
@@ -28,6 +29,8 @@ def _format_issue(issue: dict) -> dict:
         "updated": fields.get("updated"),
         "project_key": project.get("key"),
         "project_name": project.get("name"),
+        "issue_type": issue_type.get("name"),
+        "issue_type_icon": issue_type.get("iconUrl"),
     }
 
 

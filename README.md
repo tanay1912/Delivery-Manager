@@ -86,6 +86,8 @@ cd frontend && npm install && npm run dev
 | `CORS_ORIGINS` | Comma-separated allowed origins (default: `http://localhost:3000`; add `http://localhost:5173` for Vite dev if not using the proxy) |
 | `JIRA_WRITEBACK_ENABLED` | Post PR link comments to Jira (default: `true`) |
 | `JIRA_IMPACT_ANALYSIS_FIELD` | Jira custom field id for Impact Analysis (optional; auto-discovered by name if unset) |
+| `JIRA_UNIT_TESTING_FIELD` | Jira custom field id for Unit Testing Field (optional; auto-discovered by name if unset) |
+| `JIRA_ADMIN_DATABASE_FIELD` | Jira custom field id for Admin/ Database (optional; auto-discovered by name if unset) |
 
 ## Local development (without Docker)
 
@@ -114,6 +116,7 @@ Open **http://localhost:5173**. Vite proxies `/api` to `http://localhost:8000`.
 - **Projects sidebar** — Jira projects visible to your account
 - **Tickets table** — paginated issue list, filterable by project
 - **Project → repo mappings** — admin UI at `/admin/mappings`
+- **Jira custom field IDs** — admin UI at `/admin/database` (Impact Analysis, Unit Testing, Admin/ Database)
 - **Deliver workflow** — dedicated `/deliver/{issue-key}` page with estimation, implementation, and PR review
 - **Approve & Merge** — human approval in the run panel before merging the PR
 - **Session management** — HTTP-only cookies, encrypted token storage, logout
@@ -140,6 +143,23 @@ Click **Deliver** on a ticket to open the delivery workflow page (`/deliver/{iss
 - **Approve & Merge** when ready
 
 Configure OpenAI, Cursor, and Bitbucket credentials in **Settings**, and add a project mapping before running.
+
+### Admin → Database (Jira custom fields)
+
+Configure which Jira custom fields Delivery Manager writes to during delivery:
+
+1. Sign in to Delivery Manager
+2. Open **Project mappings** in the sidebar (or go to `/admin/mappings`)
+3. Click **Database** in the admin sub-navigation (or go directly to `/admin/database`)
+4. Enter optional custom field IDs:
+   - **Impact Analysis field** — written during implementation
+   - **Unit Testing Field** — written when you post Unit Testing verification to Jira
+   - **Admin/ Database field** — written with admin-related file paths (e.g. `system.xml`, `admin/`) when posting Unit Testing verification
+5. Click **Save settings**
+
+Leave a field blank to auto-discover it by name in Jira (`Impact Analysis`, `Unit Testing`, `Unit Testing Field`, or `Admin/ Database`). If your Jira field uses a different name, set the exact `customfield_XXXXX` ID from **Jira → Settings → Issues → Custom fields**.
+
+Server environment variables (`JIRA_IMPACT_ANALYSIS_FIELD`, `JIRA_UNIT_TESTING_FIELD`, `JIRA_ADMIN_DATABASE_FIELD`) override values saved in the Database admin UI when set.
 
 For Bitbucket, use your **Atlassian account email** and a **Bitbucket API token** (not an app password). Create the token at [id.atlassian.com](https://id.atlassian.com/manage-profile/security/api-tokens) with repository read and write scopes.
 

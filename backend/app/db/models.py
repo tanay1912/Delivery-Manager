@@ -76,6 +76,22 @@ class ProjectRepoMapping(Base):
     )
 
 
+class AppSettings(Base):
+    __tablename__ = "app_settings"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    jira_impact_analysis_field: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    jira_unit_testing_field: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    jira_admin_database_field: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    jira_fields_cache: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    jira_fields_cached_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class DeliveryRun(Base):
     __tablename__ = "delivery_runs"
 

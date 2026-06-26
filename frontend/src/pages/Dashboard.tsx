@@ -192,7 +192,7 @@ function DashboardContent() {
 
   return (
     <Layout user={user} siteName={siteName} onLogout={handleLogout}>
-      <div className="w-full px-4 sm:px-6 lg:px-8 py-6 h-[calc(100vh-3.5rem)] flex flex-col">
+      <div className="w-full px-4 sm:px-6 lg:px-8 py-6 flex flex-col lg:h-[calc(100vh-3.5rem)] lg:min-h-0">
         {error && (
           <div className="alert-error mb-4 flex-shrink-0 flex items-start gap-3">
             <svg className="h-5 w-5 flex-shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
@@ -233,14 +233,14 @@ function DashboardContent() {
           </div>
         </div>
 
-        <div className="flex flex-col min-h-0 flex-1">
+        <div className="flex flex-col lg:flex-1 lg:min-h-0">
           <IssueSummary
             summary={summary}
             loading={summaryLoading}
             projectLabel={selectedProjectName}
           />
 
-          <div className="card overflow-hidden flex flex-col flex-1 min-h-0 mt-5">
+          <div className="card overflow-hidden flex flex-col mt-5 lg:flex-1 lg:min-h-0">
             <div className="card-header flex items-center justify-between flex-shrink-0">
               <div>
                 <h2 className="card-title">My tickets</h2>
@@ -262,7 +262,7 @@ function DashboardContent() {
                 )}
               </div>
             </div>
-            <div className="flex-1 min-h-0 overflow-auto">
+            <div className="lg:flex-1 lg:min-h-0 lg:overflow-auto">
               <IssueTable
                 issues={issues}
                 loading={issuesLoading}

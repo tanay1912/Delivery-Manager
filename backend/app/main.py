@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, issues, mappings, projects, runs
+from app.api import admin_database, auth, issues, jira, mappings, projects, runs
 from app.auth.session import get_redis
 from app.config import settings
 from app.db.session import init_db
@@ -29,7 +29,9 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(projects.router)
 app.include_router(issues.router)
+app.include_router(jira.router)
 app.include_router(mappings.router)
+app.include_router(admin_database.router)
 app.include_router(runs.router)
 
 

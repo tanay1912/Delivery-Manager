@@ -26,7 +26,7 @@ export default function DeploymentTerminal({ lines }: { lines: TerminalLine[] })
   if (lines.length === 0) return null;
 
   return (
-    <div className="bg-gray-900 text-green-400 font-mono text-xs rounded-lg p-4 overflow-x-auto">
+    <div className="bg-gray-900 text-green-400 font-mono text-xs rounded-lg p-4 max-h-[28rem] overflow-y-auto overflow-x-auto">
       {lines.map((line) => {
         const { symbol, className } = statusPrefix(line.status);
         return (

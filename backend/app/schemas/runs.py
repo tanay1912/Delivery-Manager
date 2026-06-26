@@ -76,6 +76,17 @@ class WebsiteVerificationInfo(BaseModel):
     screenshot_filename: str | None = None
 
 
+class PendingWebsiteVerificationInfo(BaseModel):
+    environment: str
+    url: str
+    passed: bool
+    summary: str
+    findings: list[str] = []
+    draft_comment: str
+    screenshot_filename: str | None = None
+    admin_paths: list[str] = []
+
+
 class DeploymentCommandInfo(BaseModel):
     index: int
     command: str
@@ -109,6 +120,8 @@ class DeliveryRunResponse(BaseModel):
     workflow_phase_label: str
     ui_active_step: int = 1
     jira_status: str | None
+    issue_type: str | None = None
+    issue_type_icon: str | None = None
     current_step: str | None
     next_step: str | None
     next_step_label: str | None
@@ -141,6 +154,7 @@ class DeliveryRunResponse(BaseModel):
     live_deploy_commands: list[str] = []
     deployment_history: list[DeploymentAttemptInfo] = []
     verifications: list[WebsiteVerificationInfo] = []
+    pending_verification: PendingWebsiteVerificationInfo | None = None
     error_message: str | None
     workflow_notice: str | None = None
     jira_issue_url: str | None = None
@@ -226,6 +240,24 @@ def run_to_response(
         if isinstance(v, dict)
     ]
 
+    pending_raw = ctx.get("pending_verification")
+    pending_verification = None
+    if isinstance(pending_raw, dict) and pending_raw.get("environment"):
+        pending_verification = PendingWebsiteVerificationInfo(
+            environment=str(pending_raw.get("environment", "")),
+            url=str(pending_raw.get("url", "")),
+            passed=bool(pending_raw.get("passed")),
+            summary=str(pending_raw.get("summary", "")),
+            findings=[str(item) for item in (pending_raw.get("findings") or []) if str(item).strip()],
+            draft_comment=str(pending_raw.get("draft_comment") or ""),
+            screenshot_filename=pending_raw.get("screenshot_filename"),
+            admin_paths=[
+                str(item)
+                for item in (pending_raw.get("admin_paths") or [])
+                if str(item).strip()
+            ],
+        )
+
     jira_comments = [
         JiraCommentInfo(
             author=str(c.get("author", "Unknown")),
@@ -290,6 +322,8 @@ def run_to_response(
         workflow_phase_label=PHASE_LABELS.get(phase, phase.replace("_", " ").title()),
         ui_active_step=resolve_ui_active_step(run, phase, ctx),
         jira_status=ctx.get("status_name"),
+        issue_type=ctx.get("issue_type") or None,
+        issue_type_icon=ctx.get("issue_type_icon") or None,
         current_step=run.current_step,
         next_step=None,
         next_step_label=None,
@@ -322,6 +356,7 @@ def run_to_response(
         live_deploy_commands=live_deploy_commands or [],
         deployment_history=deployment_history,
         verifications=verifications,
+        pending_verification=pending_verification,
         error_message=run.error_message,
         workflow_notice=ctx.get("workflow_notice"),
         jira_issue_url=issue_url,
@@ -354,6 +389,10 @@ class DeclinePrRequest(BaseModel):
 
 class RetryDeploymentRequest(BaseModel):
     target: str | None = Field(default=None, pattern="^(beta|master)$")
+
+
+class PostVerificationRequest(BaseModel):
+    comment: str = Field(..., min_length=1)
 
 
 class RunListResponse(BaseModel):

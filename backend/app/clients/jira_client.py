@@ -64,7 +64,7 @@ class JiraClient:
         max_results: int = 50,
         next_page_token: str | None = None,
     ) -> dict:
-        fields = ["summary", "status", "priority", "assignee", "updated", "project"]
+        fields = ["summary", "status", "priority", "assignee", "updated", "project", "issuetype"]
         body: dict = {
             "jql": jql,
             "maxResults": max_results,
@@ -83,16 +83,49 @@ class JiraClient:
             response.raise_for_status()
             return response.json()
 
-    async def get_issue(self, issue_key: str) -> dict:
+    async def get_issue(self, issue_key: str, extra_fields: list[str] | None = None) -> dict:
+        fields = [
+            "summary",
+            "description",
+            "status",
+            "project",
+            "assignee",
+            "issuetype",
+            "timetracking",
+            "customfield_10016",
+            "attachment",
+        ]
+        if extra_fields:
+            for field_id in extra_fields:
+                if field_id and field_id not in fields:
+                    fields.append(field_id)
+
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 f"{self.base_url}/issue/{issue_key}",
-                params={"fields": "summary,description,status,project,assignee,timetracking,customfield_10016"},
+                params={"fields": ",".join(fields)},
                 auth=self._auth(),
                 headers=self._headers(),
             )
             response.raise_for_status()
             return response.json()
+
+    @staticmethod
+    def issue_attachments(issue: dict) -> list[dict]:
+        return list((issue.get("fields") or {}).get("attachment") or [])
+
+    @staticmethod
+    def resolve_media_attachment_id(media_id: str, alt: str, attachments: list[dict]) -> str:
+        for attachment in attachments:
+            if str(attachment.get("id") or "") == media_id:
+                return str(attachment["id"])
+        alt_name = alt.strip().lower()
+        if alt_name:
+            for attachment in attachments:
+                filename = str(attachment.get("filename") or "").strip().lower()
+                if filename and filename == alt_name:
+                    return str(attachment["id"])
+        return media_id
 
     async def get_issue_comments(self, issue_key: str) -> list[dict]:
         async with httpx.AsyncClient() as client:
@@ -105,25 +138,64 @@ class JiraClient:
             response.raise_for_status()
             return response.json().get("comments", [])
 
-    async def get_transitions(self, issue_key: str) -> list[dict]:
+    async def get_transitions(
+        self,
+        issue_key: str,
+        *,
+        expand_fields: bool = False,
+    ) -> list[dict]:
+        params: dict[str, str] = {}
+        if expand_fields:
+            params["expand"] = "transitions.fields"
+
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 f"{self.base_url}/issue/{issue_key}/transitions",
+                params=params or None,
                 auth=self._auth(),
                 headers=self._headers(),
             )
             response.raise_for_status()
             return response.json().get("transitions", [])
 
-    async def transition_issue(self, issue_key: str, transition_id: str) -> None:
+    @staticmethod
+    def format_http_error(exc: httpx.HTTPStatusError) -> str:
+        try:
+            body = exc.response.json()
+            parts = [str(msg) for msg in (body.get("errorMessages") or []) if str(msg).strip()]
+            for key, msg in (body.get("errors") or {}).items():
+                parts.append(f"{key}: {msg}")
+            if parts:
+                return f"{exc}. Jira: {'; '.join(parts)}"
+        except Exception:
+            pass
+        return str(exc)
+
+    async def transition_issue(
+        self,
+        issue_key: str,
+        transition_id: str,
+        fields: dict | None = None,
+    ) -> None:
+        body: dict = {"transition": {"id": transition_id}}
+        if fields:
+            body["fields"] = fields
+
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{self.base_url}/issue/{issue_key}/transitions",
-                json={"transition": {"id": transition_id}},
+                json=body,
                 auth=self._auth(),
                 headers={**self._headers(), "Content-Type": "application/json"},
             )
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise httpx.HTTPStatusError(
+                    JiraClient.format_http_error(exc),
+                    request=exc.request,
+                    response=exc.response,
+                ) from exc
 
     async def update_issue(self, issue_key: str, fields: dict) -> None:
         async with httpx.AsyncClient() as client:
@@ -144,6 +216,19 @@ class JiraClient:
                 headers={**self._headers(), "Content-Type": "application/json"},
             )
             response.raise_for_status()
+
+    async def fetch_attachment_content(self, attachment_id: str) -> tuple[bytes, str]:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self.base_url}/attachment/content/{attachment_id}",
+                auth=self._auth(),
+                headers={"Accept": "*/*"},
+                follow_redirects=True,
+                timeout=60.0,
+            )
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "application/octet-stream")
+            return response.content, content_type
 
     async def add_attachment(self, issue_key: str, filename: str, content: bytes, mime_type: str = "image/png") -> dict:
         async with httpx.AsyncClient() as client:
@@ -195,16 +280,74 @@ class JiraClient:
             response.raise_for_status()
             return response.json()
 
-    async def resolve_field_id(self, field_name: str, configured_id: str | None = None) -> str:
-        if configured_id and configured_id.strip():
-            field_id = configured_id.strip()
-            return field_id if field_id.startswith("customfield_") else f"customfield_{field_id}"
+    async def resolve_field_id(
+        self,
+        field_name: str | tuple[str, ...],
+        configured_id: str | None = None,
+    ) -> str:
+        from app.services.jira_fields import resolve_jira_field_id
 
-        target = field_name.lower().strip()
-        for field in await self.get_fields():
-            if field.get("name", "").lower().strip() == target:
-                return field["id"]
-        raise ValueError(f"Jira field not found: {field_name}")
+        return await resolve_jira_field_id(self, field_name, configured_id)
+
+    async def get_issue_editmeta(self, issue_key: str) -> dict:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self.base_url}/issue/{issue_key}/editmeta",
+                auth=self._auth(),
+                headers=self._headers(),
+            )
+            response.raise_for_status()
+            return response.json().get("fields") or {}
+
+    @staticmethod
+    def is_select_field_empty(value) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return not value.strip()
+        if isinstance(value, dict):
+            return not any(value.get(key) for key in ("value", "name", "id"))
+        if isinstance(value, list):
+            return len(value) == 0
+        return False
+
+    @staticmethod
+    def select_field_payload(value: str, *, option_id: str | None = None) -> dict:
+        if option_id:
+            return {"id": option_id}
+        return {"value": value}
+
+    async def _resolve_select_option_id(
+        self,
+        issue_key: str,
+        field_id: str,
+        value: str,
+    ) -> str | None:
+        target = value.lower().strip()
+        editmeta = await self.get_issue_editmeta(issue_key)
+        field_meta = editmeta.get(field_id) or {}
+        for option in field_meta.get("allowedValues") or []:
+            option_value = str(option.get("value") or option.get("name") or "").strip()
+            if option_value.lower() == target:
+                option_id = option.get("id")
+                return str(option_id) if option_id is not None else None
+        return None
+
+    async def set_select_field_value(self, issue_key: str, field_id: str, value: str) -> None:
+        try:
+            await self.update_issue(
+                issue_key,
+                {field_id: self.select_field_payload(value)},
+            )
+            return
+        except httpx.HTTPStatusError:
+            option_id = await self._resolve_select_option_id(issue_key, field_id, value)
+            if not option_id:
+                raise
+            await self.update_issue(
+                issue_key,
+                {field_id: self.select_field_payload(value, option_id=option_id)},
+            )
 
     async def set_paragraph_field(self, issue_key: str, field_id: str, text: str) -> None:
         try:
@@ -215,14 +358,16 @@ class JiraClient:
     @staticmethod
     def extract_description(issue: dict) -> str:
         description = (issue.get("fields") or {}).get("description")
+        attachments = JiraClient.issue_attachments(issue)
         if description is None:
             return ""
         if isinstance(description, str):
             return description
-        return JiraClient._adf_to_text(description)
+        return JiraClient._adf_to_text(description, attachments=attachments)
 
     @staticmethod
-    def normalize_comments(raw_comments: list[dict]) -> list[dict]:
+    def normalize_comments(raw_comments: list[dict], attachments: list[dict] | None = None) -> list[dict]:
+        attachment_list = attachments or []
         normalized: list[dict] = []
         for comment in raw_comments:
             body = comment.get("body")
@@ -231,7 +376,7 @@ class JiraClient:
             elif isinstance(body, str):
                 text = body
             else:
-                text = JiraClient._adf_to_text(body)
+                text = JiraClient._adf_to_text(body, attachments=attachment_list)
             text = text.strip()
             if not text:
                 continue
@@ -273,10 +418,11 @@ class JiraClient:
         return "\n\n".join(parts) if parts else "(no description or comments)"
 
     @staticmethod
-    def _adf_to_text(node: dict) -> str:
+    def _adf_to_text(node: dict, attachments: list[dict] | None = None) -> str:
         if not isinstance(node, dict):
             return ""
         node_type = node.get("type")
+        attachment_list = attachments or []
 
         if node_type == "text":
             text = node.get("text", "")
@@ -292,6 +438,15 @@ class JiraClient:
         if node_type == "inlineCard":
             return str((node.get("attrs") or {}).get("url") or "").strip()
 
+        if node_type == "media":
+            attrs = node.get("attrs") or {}
+            media_id = str(attrs.get("id") or "").strip()
+            alt = str(attrs.get("alt") or attrs.get("filename") or "Image").strip()
+            if media_id:
+                attachment_id = JiraClient.resolve_media_attachment_id(media_id, alt, attachment_list)
+                return f"\n{{{{jira-media:{attachment_id}|{alt}}}}}\n"
+            return f"\n[Image: {alt}]\n"
+
         if node_type == "hardBreak":
             return "\n"
 
@@ -300,7 +455,7 @@ class JiraClient:
 
         parts: list[str] = []
         for child in node.get("content") or []:
-            parts.append(JiraClient._adf_to_text(child))
+            parts.append(JiraClient._adf_to_text(child, attachments=attachment_list))
         text = "".join(parts)
 
         if node_type in {"paragraph", "heading", "listItem", "blockquote", "tableCell", "tableHeader"}:

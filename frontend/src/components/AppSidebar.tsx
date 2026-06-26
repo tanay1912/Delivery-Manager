@@ -23,6 +23,19 @@ function TicketsIcon() {
   );
 }
 
+function HistoryIcon() {
+  return (
+    <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth={1.75}
+        d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+      />
+    </svg>
+  );
+}
+
 function MappingsIcon() {
   return (
     <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
@@ -106,9 +119,16 @@ const WORK_NAV: NavItem[] = [
     match: (p) => p === "/dashboard",
   },
   {
+    to: "/history",
+    label: "Ticket history",
+    description: "Past delivery runs",
+    icon: <HistoryIcon />,
+    match: (p) => p === "/history",
+  },
+  {
     to: "/admin/mappings",
     label: "Project mappings",
-    description: "Jira ↔ Bitbucket links",
+    description: "Jira ↔ Bitbucket & field config",
     icon: <MappingsIcon />,
     match: (p) => p.startsWith("/admin"),
   },
@@ -158,7 +178,7 @@ function SidebarLink({ item, pathname }: { item: NavItem; pathname: string }) {
       <span className="min-w-0 flex-1">
         <span className="block truncate font-medium">{item.label}</span>
         {item.description && (
-          <span className={`block truncate text-[11px] mt-0.5 ${active ? "text-blue-200/80" : "text-slate-500"}`}>
+          <span className={`block truncate text-[11px] mt-0.5 ${active ? "text-brand-700/80" : "text-slate-500"}`}>
             {item.description}
           </span>
         )}
@@ -183,11 +203,11 @@ function SidebarSubLink({ item, pathname }: { item: NavItem; pathname: string })
 export default function AppSidebar() {
   const { pathname } = useLocation();
   const settingsActive = pathname.startsWith("/settings");
-  const onDashboard = pathname === "/dashboard";
+  const showProjectList = pathname === "/dashboard" || pathname === "/history";
   const dashboardProjects = useDashboardProjects();
 
   return (
-    <aside className="app-sidebar flex flex-col w-64 flex-shrink-0 border-r border-slate-200/90 bg-white/80 backdrop-blur-sm">
+    <aside className="app-sidebar flex flex-col w-64 flex-shrink-0 border-r border-slate-200/90 bg-surface-muted/95 backdrop-blur-sm">
       <nav className="flex-1 overflow-y-auto py-4 px-3 space-y-6" aria-label="Main navigation">
         <div>
           <p className="sidebar-section-label">Work</p>
@@ -198,11 +218,11 @@ export default function AppSidebar() {
           </div>
         </div>
 
-        {onDashboard && dashboardProjects && (
+        {showProjectList && dashboardProjects && (
           <div className="flex flex-col min-h-0">
             <p className="sidebar-section-label">Configured projects</p>
-            <div className="mt-2 rounded-xl border border-slate-200/90 bg-slate-50/50 overflow-hidden flex flex-col max-h-[min(24rem,40vh)]">
-              <div className="px-3 py-2.5 border-b border-slate-200/70 bg-white/60 flex-shrink-0">
+            <div className="mt-2 rounded-xl border border-slate-200/90 bg-white overflow-hidden flex flex-col max-h-[min(24rem,40vh)] shadow-sm">
+              <div className="px-3 py-2.5 border-b border-slate-200/70 bg-surface-muted/80 flex-shrink-0">
                 <p className="text-xs text-slate-500">
                   {dashboardProjects.projectsLoading && dashboardProjects.projects.length === 0
                     ? "Loading..."
@@ -245,7 +265,7 @@ export default function AppSidebar() {
         </div>
       </nav>
 
-      <div className="flex-shrink-0 px-4 py-4 border-t border-slate-200/80 bg-slate-50/50">
+      <div className="flex-shrink-0 px-4 py-4 border-t border-slate-200/80 bg-surface-subtle/80">
         <p className="text-[11px] text-slate-500 leading-relaxed">
           Credentials are encrypted per session and cleared on logout.
         </p>
