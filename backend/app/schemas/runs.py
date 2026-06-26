@@ -10,6 +10,7 @@ from app.services.delivery_pipeline import (
     get_workflow_phase,
     is_unified_deploy_target,
     resolve_draft_comment,
+    resolve_ui_active_step,
 )
 
 
@@ -91,6 +92,7 @@ class DeploymentAttemptInfo(BaseModel):
     status: str
     started_at: str
     completed_at: str | None = None
+    planned_commands: list[str] = []
     commands: list[DeploymentCommandInfo] = []
     output: str | None = None
     error: str | None = None
@@ -105,6 +107,7 @@ class DeliveryRunResponse(BaseModel):
     status: str
     workflow_phase: str
     workflow_phase_label: str
+    ui_active_step: int = 1
     jira_status: str | None
     current_step: str | None
     next_step: str | None
@@ -123,6 +126,7 @@ class DeliveryRunResponse(BaseModel):
     changed_files: list[ChangedFileInfo]
     changed_files_refreshed_at: str | None = None
     branch_name: str | None
+    local_project_directory: str | None = None
     pr_url: str | None
     pr_id: int | None
     beta_pr_url: str | None = None
@@ -172,7 +176,7 @@ def run_to_response(
         if isinstance(entry, dict) and entry.get("step"):
             step_status[entry["step"]] = entry.get("status", "pending")
 
-    if phase in ("implementation", "completed", "pr_review"):
+    if phase in ("implementation", "local_development", "completed", "pr_review"):
         pipeline = [
             PipelineStepInfo(step=step, label=label, status=step_status.get(step, "pending"))
             for step, label in IMPLEMENTATION_STEPS
@@ -252,6 +256,11 @@ def run_to_response(
             status=str(item.get("status", "")),
             started_at=str(item.get("started_at", "")),
             completed_at=item.get("completed_at"),
+            planned_commands=[
+                str(command)
+                for command in (item.get("planned_commands") or [])
+                if str(command).strip()
+            ],
             commands=[
                 DeploymentCommandInfo(
                     index=int(cmd.get("index", 0)),
@@ -279,6 +288,7 @@ def run_to_response(
         status=status,
         workflow_phase=phase,
         workflow_phase_label=PHASE_LABELS.get(phase, phase.replace("_", " ").title()),
+        ui_active_step=resolve_ui_active_step(run, phase, ctx),
         jira_status=ctx.get("status_name"),
         current_step=run.current_step,
         next_step=None,
@@ -297,6 +307,7 @@ def run_to_response(
         changed_files=changed_files,
         changed_files_refreshed_at=ctx.get("changed_files_refreshed_at"),
         branch_name=run.branch_name,
+        local_project_directory=(ctx.get("mapping") or {}).get("local_project_directory") or None,
         pr_url=run.pr_url or ctx.get("beta_pr_url"),
         pr_id=run.pr_id or ctx.get("beta_pr_id"),
         beta_pr_url=ctx.get("beta_pr_url") or run.pr_url,

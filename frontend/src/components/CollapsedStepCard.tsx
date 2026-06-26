@@ -46,7 +46,7 @@ export default function CollapsedStepCard({
           className={`flex-shrink-0 flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 transition-transform ${
             expanded ? "rotate-180" : ""
           }`}
-          aria-hidden="true"
+          aria-label={expanded ? "Collapse details" : "Expand details"}
         >
           <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />

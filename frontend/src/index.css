@@ -16,7 +16,7 @@
   }
 
   ::selection {
-    @apply bg-brand-200 text-brand-900;
+    @apply bg-blue-200 text-blue-900;
   }
 }
 
@@ -38,19 +38,19 @@
   }
 
   .btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-xl text-sm font-semibold transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none;
+    @apply inline-flex items-center justify-center gap-2 rounded-lg text-sm font-medium transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none;
   }
 
   .btn-primary {
-    @apply btn px-4 py-2.5 bg-brand-600 text-white shadow-brand hover:bg-brand-700 hover:shadow-brand-md focus-visible:ring-brand-500 active:scale-[0.98];
+    @apply btn px-4 py-2 bg-blue-600 text-white hover:bg-blue-700 focus-visible:ring-blue-500 active:scale-[0.98];
   }
 
   .btn-secondary {
-    @apply btn px-4 py-2.5 border border-slate-200 bg-white text-slate-700 shadow-sm hover:bg-slate-50 hover:border-slate-300 focus-visible:ring-slate-400 active:scale-[0.98];
+    @apply btn px-4 py-2 border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 focus-visible:ring-gray-400 active:scale-[0.98];
   }
 
   .btn-highlight {
-    @apply btn px-4 py-2.5 border border-brand-200/80 bg-brand-50 text-brand-700 ring-1 ring-brand-200/40 hover:bg-brand-100 hover:border-brand-300 hover:text-brand-800 focus-visible:ring-brand-500 active:scale-[0.98];
+    @apply btn px-4 py-2.5 border border-blue-200/80 bg-blue-50 text-blue-700 ring-1 ring-blue-200/40 hover:bg-blue-100 hover:border-blue-300 hover:text-blue-800 focus-visible:ring-blue-500 active:scale-[0.98];
   }
 
   .btn-ghost {
@@ -58,7 +58,7 @@
   }
 
   .btn-danger {
-    @apply btn px-4 py-2.5 bg-red-600 text-white shadow-sm hover:bg-red-700 focus-visible:ring-red-500 active:scale-[0.98];
+    @apply btn px-4 py-2 bg-red-600 text-white hover:bg-red-700 focus-visible:ring-red-500 active:scale-[0.98];
   }
 
   .btn-success {
@@ -70,7 +70,7 @@
   }
 
   .input {
-    @apply block w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 shadow-sm transition-colors focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20;
+    @apply block w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 shadow-sm transition-colors focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500;
   }
 
   .label {
@@ -82,7 +82,7 @@
   }
 
   .badge-success {
-    @apply badge bg-emerald-50 text-emerald-700 ring-emerald-600/20;
+    @apply inline-flex items-center bg-green-50 text-green-700 border border-green-200 text-xs font-medium px-2.5 py-0.5 rounded-full;
   }
 
   .badge-info {
@@ -126,7 +126,7 @@
   }
 
   .badge-disconnected {
-    @apply badge bg-red-50 text-red-700 ring-red-600/20;
+    @apply inline-flex items-center bg-gray-100 text-gray-500 text-xs px-2.5 py-0.5 rounded-full;
   }
 
   .nav-link-active {
@@ -154,7 +154,7 @@
   }
 
   .btn-deliver {
-    @apply inline-flex items-center justify-center gap-1.5 rounded-full px-4 py-1.5 text-xs font-semibold bg-brand-600 text-white shadow-brand transition-all duration-150 hover:bg-brand-700 hover:shadow-brand-md hover:scale-105 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none disabled:hover:scale-100;
+    @apply inline-flex items-center justify-center gap-1.5 rounded-full px-4 py-1.5 text-xs font-semibold bg-blue-600 text-white shadow-sm transition-all duration-150 hover:bg-blue-700 hover:shadow-md hover:scale-105 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none disabled:hover:scale-100;
   }
 
   .table-header {
@@ -166,11 +166,11 @@
   }
 
   .tab {
-    @apply relative flex flex-1 items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-slate-600 transition-colors hover:text-slate-900 hover:bg-white/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/30 sm:flex-none sm:px-5;
+    @apply relative flex flex-1 items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-slate-600 transition-colors hover:text-slate-900 hover:bg-white/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/30 sm:flex-none sm:px-5;
   }
 
   .tab-active {
-    @apply tab bg-white text-brand-700 ring-1 ring-slate-200/80 hover:bg-white hover:text-brand-800;
+    @apply tab bg-white text-blue-700 ring-1 ring-slate-200/80 hover:bg-white hover:text-blue-800;
   }
 
   .tab-status-dot {
@@ -210,6 +210,46 @@
   }
 
   .external-link {
-    @apply inline-flex items-center gap-1 text-brand-600 hover:text-brand-700 transition-colors;
+    @apply inline-flex items-center gap-1 text-blue-600 hover:text-blue-700 transition-colors;
+  }
+
+  .app-sidebar {
+    @apply hidden lg:flex;
+  }
+
+  .sidebar-section-label {
+    @apply px-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400;
+  }
+
+  .sidebar-nav-item {
+    @apply flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-all text-slate-600 hover:bg-slate-50 hover:text-slate-900;
+  }
+
+  .sidebar-nav-item-active {
+    @apply bg-blue-50 text-blue-700 ring-1 ring-blue-200/60 hover:bg-blue-50 hover:text-blue-700;
+  }
+
+  .sidebar-nav-icon {
+    @apply flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-500 transition-colors;
+  }
+
+  .sidebar-nav-icon-active {
+    @apply bg-blue-100 text-blue-600;
+  }
+
+  .sidebar-subnav-item {
+    @apply flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-all text-slate-600 hover:bg-slate-50 hover:text-slate-900;
+  }
+
+  .sidebar-subnav-item-active {
+    @apply bg-slate-100 text-slate-900 font-semibold;
+  }
+
+  .sidebar-subnav-icon {
+    @apply flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md text-slate-400;
+  }
+
+  .sidebar-subnav-item-active .sidebar-subnav-icon {
+    @apply text-blue-600;
   }
 }

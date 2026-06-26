@@ -2,6 +2,11 @@ import { useState } from "react";
 import { DeliveryRun, WebsiteVerification } from "../api/client";
 import DeploymentTerminal, { TerminalLine } from "./DeploymentTerminal";
 import DeploymentErrorBanner from "./DeploymentErrorBanner";
+import {
+  deploymentErrorSummary,
+  deploymentErrorTitle,
+  isGitAuthDeploymentError,
+} from "../utils/deploymentErrors";
 
 interface VerificationPanelProps {
   run: DeliveryRun;
@@ -9,11 +14,11 @@ interface VerificationPanelProps {
   deploymentFailed: boolean;
   mergeFailedTarget: "beta" | "master" | null;
   deploymentErrorMessage: string | null;
+  deploymentFailureDetail: string | null;
   mergeErrorMessage: string | null;
   terminalLines: TerminalLine[];
   mergeInProgress: boolean;
   retryingDeployment: boolean;
-  onRetryDeployment: () => void;
   retryDisabled: boolean;
   showDeployButton: boolean;
   onRunDeploy?: () => void;
@@ -38,7 +43,7 @@ function VerifyChecklistItem({
           checked={verified}
           onChange={onToggle}
           disabled={item.passed}
-          className="mt-1 h-5 w-5 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
+          className="mt-1 h-5 w-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
           aria-label={`Mark ${item.environment} as verified`}
         />
         <div className="flex-1 min-w-0">
@@ -49,7 +54,7 @@ function VerifyChecklistItem({
                 Verified
               </span>
             ) : (
-              <span className="rounded-full bg-purple-100 px-2.5 py-0.5 text-xs font-semibold text-purple-700">
+              <span className="rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-semibold text-blue-700">
                 Pending
               </span>
             )}
@@ -60,7 +65,7 @@ function VerifyChecklistItem({
             href={item.url}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 mt-3 rounded-lg bg-purple-600 px-4 py-2 text-sm font-semibold text-white hover:bg-purple-700 transition-colors"
+            className="inline-flex items-center gap-1.5 mt-3 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 transition-colors"
           >
             Open &amp; Verify {item.environment} →
           </a>
@@ -104,7 +109,7 @@ function statusIndicator({
   retryingDeployment: boolean;
 }): { label: string; className: string } {
   if (retryingDeployment || mergeInProgress) {
-    return { label: "In progress", className: "bg-purple-100 text-purple-700" };
+    return { label: "In progress", className: "bg-blue-100 text-blue-700" };
   }
   if (deploymentFailed) {
     return { label: "Deployment failed", className: "bg-red-100 text-red-700" };
@@ -142,11 +147,11 @@ export default function VerificationPanel({
   deploymentFailed,
   mergeFailedTarget,
   deploymentErrorMessage,
+  deploymentFailureDetail,
   mergeErrorMessage,
   terminalLines,
   mergeInProgress,
   retryingDeployment,
-  onRetryDeployment,
   retryDisabled,
   showDeployButton,
   onRunDeploy,
@@ -171,16 +176,16 @@ export default function VerificationPanel({
 
   return (
     <section
-      className={`bg-white rounded-xl p-6 mb-6 ${
+      className={`bg-white rounded-xl p-6 ${
         isActive
-          ? "border-2 border-purple-500 shadow-lg"
-          : "border border-slate-200/80"
+          ? "border-2 border-blue-500 shadow-lg"
+          : "border border-slate-200/80 shadow-sm"
       }`}
     >
       {isActive && (
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="rounded-full bg-purple-600 px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide text-white">
+            <span className="rounded-full bg-blue-600 px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide text-white">
               Active Step
             </span>
             <h2 className="text-lg font-bold text-slate-900">Step 4 — Verification</h2>
@@ -195,13 +200,24 @@ export default function VerificationPanel({
         <p className="text-sm text-slate-600 mb-5 leading-relaxed">{description}</p>
       )}
 
-      {deploymentFailed && (
+      {deploymentFailed && !retryingDeployment && !mergeInProgress && (
         <DeploymentErrorBanner
-          message="The pull request was merged, but deployment commands did not complete. Retry deployment to continue verification."
-          detail={deploymentErrorMessage}
-          onRetry={onRetryDeployment}
-          retrying={retryingDeployment}
-          retryDisabled={retryDisabled}
+          title={
+            run.pending_deploy_retry === "beta"
+              ? "Staging Deployment Failed"
+              : deploymentErrorTitle(deploymentErrorMessage)
+          }
+          message={
+            run.pending_deploy_retry === "beta"
+              ? 'The deployment commands did not complete successfully. Click "Retry Deployment" to run them again.'
+              : deploymentErrorSummary(deploymentErrorMessage)
+          }
+          detail={
+            deploymentFailureDetail ??
+            (deploymentErrorMessage && !isGitAuthDeploymentError(deploymentErrorMessage)
+              ? deploymentErrorMessage
+              : null)
+          }
         />
       )}
 
@@ -223,7 +239,7 @@ export default function VerificationPanel({
             type="button"
             onClick={onRunDeploy}
             disabled={retryDisabled || retryingDeployment || mergeInProgress}
-            className="rounded-lg bg-purple-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-purple-700 disabled:opacity-50 transition-colors"
+            className="rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
           >
             {retryingDeployment ? "Running…" : "Run Staging deployment commands"}
           </button>
@@ -237,6 +253,13 @@ export default function VerificationPanel({
         </div>
       )}
 
+      {retryingDeployment && terminalLines.length === 0 && (
+        <p className="text-sm text-slate-500 flex items-center gap-2 mb-5">
+          <span className="h-4 w-4 rounded-full border-2 border-slate-200 border-t-blue-600 animate-spin" />
+          Starting deployment commands…
+        </p>
+      )}
+
       {verifications.length > 0 && (
         <div>
           <h3 className="text-sm font-semibold text-slate-700 mb-3">Website verification</h3>
@@ -246,7 +269,7 @@ export default function VerificationPanel({
 
       {mergeInProgress && terminalLines.length === 0 && verifications.length === 0 && (
         <p className="text-sm text-slate-500 flex items-center gap-2">
-          <span className="h-4 w-4 rounded-full border-2 border-slate-200 border-t-purple-600 animate-spin" />
+          <span className="h-4 w-4 rounded-full border-2 border-slate-200 border-t-blue-600 animate-spin" />
           Merge and deployment in progress…
         </p>
       )}

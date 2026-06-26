@@ -42,6 +42,11 @@ def _looks_like_app_password(api_token: str) -> bool:
     return api_token.startswith("ATBB")
 
 
+def reject_bitbucket_app_password_for_git(git_password: str) -> None:
+    if _looks_like_app_password(git_password.strip()):
+        raise ValueError(_APP_PASSWORD_WITH_EMAIL_MESSAGE)
+
+
 def _scope_grant_from_response(response: httpx.Response) -> list[str] | None:
     """If a 403 response is an authenticated 'missing scope' error, return granted scopes.
 
@@ -145,10 +150,27 @@ def bitbucket_client_from_session(session: dict) -> BitbucketClient:
     )
 
 
+def bitbucket_git_configured(session: dict) -> bool:
+    return bool(session.get("bitbucket_git_username") and session.get("bitbucket_git_password_encrypted"))
+
+
 def bitbucket_git_credentials(session: dict) -> tuple[str, str] | None:
+    if bitbucket_git_configured(session):
+        return (
+            session["bitbucket_git_username"],
+            decrypt_token(session["bitbucket_git_password_encrypted"]),
+        )
     if not bitbucket_configured(session):
         return None
     return (
         BITBUCKET_GIT_USERNAME,
         decrypt_token(session["bitbucket_app_password_encrypted"]),
     )
+
+
+def bitbucket_git_password(session: dict) -> str:
+    return decrypt_token(session["bitbucket_git_password_encrypted"])
+
+
+def bitbucket_app_password(session: dict) -> str:
+    return decrypt_token(session["bitbucket_app_password_encrypted"])

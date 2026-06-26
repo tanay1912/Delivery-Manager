@@ -35,15 +35,15 @@ function resolvePrStatus(
 const statusStyles: Record<PrStatusVariant, { card: string; status: string }> = {
   failed: {
     card: "border-l-4 border-red-500",
-    status: "bg-red-50 border-t border-red-100 text-red-800",
+    status: "bg-red-50 border border-red-200 text-red-800",
   },
   success: {
     card: "border-l-4 border-green-500",
-    status: "bg-green-50 border-t border-green-100 text-green-800",
+    status: "bg-green-50 border border-green-200 text-green-800",
   },
   neutral: {
     card: "border-l-4 border-gray-300",
-    status: "bg-gray-50 border-t border-gray-100 text-gray-700",
+    status: "bg-gray-50 border border-gray-200 text-gray-700",
   },
 };
 
@@ -62,7 +62,7 @@ function PrCard({
   const styles = statusStyles[variant];
 
   return (
-    <div className={`rounded-xl border border-gray-200 overflow-hidden flex flex-col ${status ? styles.card : ""}`}>
+    <div className={`rounded-xl border border-gray-200 overflow-hidden flex flex-col h-full ${status ? styles.card : ""}`}>
       <div className="p-4 flex-1">
         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-3">{title}</p>
         {prUrl ? (
@@ -70,7 +70,7 @@ function PrCard({
             href={prUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 text-sm font-medium text-blue-600 hover:text-blue-800"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-gray-50 transition-colors"
           >
             View PR
             <ExternalLinkIcon />
@@ -80,7 +80,7 @@ function PrCard({
         )}
       </div>
       {status && (
-        <div className={`px-4 py-3 text-sm ${styles.status}`}>
+        <div className={`px-4 py-3 text-sm mt-auto -mx-px -mb-px rounded-b-xl ${styles.status}`}>
           <span className="font-medium text-slate-600">Status:</span>{" "}
           <span className="font-semibold">
             {status.emoji} {status.label}
@@ -141,7 +141,7 @@ export default function PullRequestDetailsCard({
   );
 
   return (
-    <div className="mb-6 space-y-4">
+    <div className="space-y-4">
       {run.branch_name && (
         <div className="bg-white border border-gray-100 rounded-xl shadow-sm p-4">
           <p className="text-sm font-medium text-slate-700 mb-2">

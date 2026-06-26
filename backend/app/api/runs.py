@@ -27,11 +27,14 @@ from app.services.deploy_commands import fetch_all_deploy_commands_from_db
 from app.services.delivery_pipeline import (
     PipelineError,
     apply_code_revision,
+    apply_local_code_revision,
+    get_workflow_phase,
     approve_and_merge,
+    confirm_local_and_create_prs,
+    create_prs_from_local,
     decline_prs_and_restart,
     ensure_in_estimation_status,
     get_run_file_diff,
-    get_workflow_phase,
     has_pending_post_merge_work,
     merge_pr_target,
     post_estimation,
@@ -45,7 +48,6 @@ from app.services.delivery_pipeline import (
     start_implementation,
     sync_pr_review_state,
     sync_jira_workflow_state,
-    _auto_prepare_estimation_if_needed,
     _fetch_issue_snapshot,
 )
 
@@ -116,6 +118,7 @@ def _should_preserve_failed_run(run: DeliveryRun) -> bool:
     return get_workflow_phase(run) in (
         "pr_review",
         "implementation",
+        "local_development",
         "ready_for_implementation",
     )
 
@@ -236,11 +239,6 @@ async def start_run(
                 detail=f"Failed to update Jira status: {exc}",
             ) from exc
 
-        try:
-            run = await _auto_prepare_estimation_if_needed(db, run, session, snapshot)
-        except Exception:
-            await db.refresh(run)
-
     return await _run_response(run, session, db)
 
 
@@ -355,11 +353,53 @@ async def start_implementation_endpoint(
     phase = get_workflow_phase(run)
     if phase in ("implementation", "pr_review") and run.status != "failed":
         raise HTTPException(status_code=409, detail="Implementation is already in progress")
+    if phase == "local_development":
+        return await _run_response(run, session, db)
     if phase == "completed" or run.status == "awaiting_approval":
         return await _run_response(run, session, db)
 
     try:
         run = await start_implementation(db, run, session)
+    except PipelineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await _run_response(run, session, db)
+
+
+@router.post("/{run_id}/confirm-local-changes", response_model=DeliveryRunResponse)
+async def confirm_local_changes_endpoint(
+    run_id: uuid.UUID,
+    session: dict = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    run = await db.get(DeliveryRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.status == "running":
+        raise HTTPException(status_code=409, detail="A step is already running")
+
+    try:
+        run = await create_prs_from_local(db, run, session)
+    except PipelineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await _run_response(run, session, db)
+
+
+@router.post("/{run_id}/create-prs", response_model=DeliveryRunResponse)
+async def create_prs_endpoint(
+    run_id: uuid.UUID,
+    session: dict = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    run = await db.get(DeliveryRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.status == "running":
+        raise HTTPException(status_code=409, detail="A step is already running")
+
+    try:
+        run = await create_prs_from_local(db, run, session)
     except PipelineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -552,7 +592,11 @@ async def apply_revision_endpoint(
         raise HTTPException(status_code=409, detail="A step is already running")
 
     try:
-        run = await apply_code_revision(db, run, session, body.prompt)
+        phase = get_workflow_phase(run)
+        if phase == "local_development":
+            run = await apply_local_code_revision(db, run, session, body.prompt)
+        else:
+            run = await apply_code_revision(db, run, session, body.prompt)
     except PipelineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

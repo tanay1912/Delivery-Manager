@@ -9,7 +9,9 @@ from app.services.deploy_commands import (
     build_post_merge_shell_script,
     commands_need_bitbucket_auth,
     deploy_commands_for_environment,
+    format_deploy_command_failure,
     parse_post_pr_merge_commands,
+    strip_docker_tty_flags,
 )
 
 DeployCommandProgressCallback = Callable[[str, int, int, str, str], Awaitable[None]]
@@ -82,12 +84,13 @@ async def run_environment_deploy(
         if not bitbucket_username or not bitbucket_app_password:
             raise DeployError(
                 "Deployment includes git commands that require Bitbucket authentication. "
-                "Add your Atlassian account email and Bitbucket API token in Settings."
+                "Add Bitbucket git username and password in Settings."
             )
         execution_commands = [
             apply_bitbucket_auth_to_command(command, bitbucket_username, bitbucket_app_password)
             for command in commands
         ]
+    execution_commands = [strip_docker_tty_flags(command) for command in execution_commands]
 
     host = mapping.ssh_host.strip()
     username = mapping.ssh_username.strip()
@@ -137,7 +140,7 @@ async def run_environment_deploy(
                     detail = stderr or stdout or f"exit code {result.exit_status}"
                     if on_command_progress:
                         await on_command_progress("failed", index, total, display_command, detail)
-                    raise DeployError(f"Deployment command failed ({display_command}): {detail}")
+                    raise DeployError(format_deploy_command_failure(display_command, detail))
 
                 if on_command_progress:
                     await on_command_progress("completed", index, total, display_command, stdout)

@@ -1,26 +1,24 @@
 import { ReactNode } from "react";
 
 interface DeliveryActionBarProps {
-  primary?: ReactNode;
-  secondary?: ReactNode;
-  danger?: ReactNode;
+  left?: ReactNode;
+  right?: ReactNode;
+  bottom?: ReactNode;
 }
 
-export default function DeliveryActionBar({ primary, secondary, danger }: DeliveryActionBarProps) {
-  if (!primary && !secondary && !danger) return null;
+export default function DeliveryActionBar({ left, right, bottom }: DeliveryActionBarProps) {
+  if (!left && !right && !bottom) return null;
 
   return (
-    <div className="sticky bottom-0 z-30 -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8 py-4 bg-white border-t border-gray-200 shadow-[0_-4px_12px_rgba(15,23,42,0.06)] mt-6">
-      <div className="space-y-3 max-w-3xl mx-auto">
-        {primary && <div>{primary}</div>}
-        {secondary && (
-          <div className="flex flex-wrap gap-2 justify-center sm:justify-start">{secondary}</div>
-        )}
-        {danger && (
-          <div className="pt-3 border-t border-gray-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-            {danger}
+    <div className="sticky bottom-0 z-30 bg-white border-t border-gray-200 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] px-6 py-4 -mx-6">
+      <div className="space-y-3">
+        {(left || right) && (
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap gap-2">{left}</div>
+            <div className="flex flex-wrap gap-2 justify-end">{right}</div>
           </div>
         )}
+        {bottom && <div>{bottom}</div>}
       </div>
     </div>
   );

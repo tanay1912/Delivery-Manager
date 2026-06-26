@@ -42,6 +42,8 @@ services:
       DATABASE_URL: postgresql+asyncpg://deliverymanager:deliverymanager@postgres:5432/deliverymanager
     volumes:
       - ./backend/app:/app/app
+      # Host path for local_project_directory (e.g. /var/www/html/myproject)
+      - ${LOCAL_PROJECTS_HOST_PATH:-/var/www/html}:${LOCAL_PROJECTS_HOST_PATH:-/var/www/html}
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     depends_on:
       redis:

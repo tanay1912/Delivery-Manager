@@ -12,8 +12,8 @@ function ExternalLinkIcon() {
 
 function linkClassName(inline?: boolean) {
   return inline
-    ? "text-brand-600 hover:text-brand-800 underline underline-offset-2 break-all"
-    : "inline-flex items-center gap-1 text-brand-600 hover:text-brand-800 font-medium break-all";
+    ? "text-blue-600 hover:text-blue-800 underline underline-offset-2 break-all"
+    : "inline-flex items-center gap-1 text-blue-600 hover:text-blue-800 font-medium break-all";
 }
 
 function renderLine(line: string, keyPrefix: string, inlineLinks: boolean): ReactNode {

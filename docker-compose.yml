@@ -37,6 +37,9 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: postgresql+asyncpg://deliverymanager:deliverymanager@postgres:5432/deliverymanager
+    volumes:
+      # Host path for local_project_directory (e.g. /var/www/html/myproject)
+      - ${LOCAL_PROJECTS_HOST_PATH:-/var/www/html}:${LOCAL_PROJECTS_HOST_PATH:-/var/www/html}
     depends_on:
       redis:
         condition: service_healthy

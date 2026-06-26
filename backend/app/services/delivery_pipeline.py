@@ -46,6 +46,7 @@ WORKFLOW_PHASES: list[tuple[str, str]] = [
     ("waiting_for_info", "Waiting for info"),
     ("ready_for_implementation", "Ready for implementation"),
     ("implementation", "Implementation"),
+    ("local_development", "Local development"),
     ("pr_review", "Pull request review"),
     ("completed", "Completed"),
 ]
@@ -60,6 +61,7 @@ IMPLEMENTATION_STEPS: list[tuple[str, str]] = [
     ("repo_stack", "Detect repository stack"),
     ("cursor_development", "Develop with Cursor SDK"),
     ("commit_changes", "Commit changes to branch"),
+    ("confirm_local_changes", "Create pull requests"),
     ("create_pr_beta", "Create pull request to Staging"),
     ("create_pr_master", "Create pull request to Master"),
     ("verify_beta", "Verify Staging website"),
@@ -90,6 +92,117 @@ def _openai_client(session: dict) -> OpenAIClient:
 def get_workflow_phase(run: DeliveryRun) -> str:
     ctx = run.context_data or {}
     return ctx.get("workflow_phase", "estimation")
+
+
+PIPELINE_STEP_UI_STEP: dict[str, int] = {
+    "estimate": 1,
+    "post_estimation": 2,
+    "impact_analysis": 2,
+    "transition_in_progress": 2,
+    "resolve_mapping": 2,
+    "create_branch": 2,
+    "repo_stack": 2,
+    "cursor_development": 2,
+    "commit_changes": 2,
+    "confirm_local_changes": 2,
+    "create_pr_beta": 3,
+    "create_pr_master": 3,
+    "merge_beta_pr": 4,
+    "deploy_beta": 4,
+    "verify_beta": 4,
+    "merge_master_pr": 4,
+    "deploy_master": 4,
+    "verify_master": 4,
+    "transition_in_testing": 4,
+}
+
+
+def _derive_ui_active_step(run: DeliveryRun, phase: str, ctx: dict) -> int:
+    if phase == "completed" and run.status == "completed":
+        return 4
+
+    has_open_prs = bool(
+        run.pr_id
+        or ctx.get("beta_pr_id")
+        or ctx.get("master_pr_id")
+        or run.pr_url
+        or ctx.get("beta_pr_url")
+        or ctx.get("master_pr_url")
+    )
+    has_post_merge = bool(
+        ctx.get("pending_deploy_retry") or ctx.get("beta_merged") or ctx.get("master_merged")
+    )
+    verifications = ctx.get("verifications") or []
+    verification_done = phase == "completed" and run.status == "completed"
+    show_merge_progress = _has_merge_progress(run, ctx)
+    verification_in_progress = (
+        has_post_merge
+        or (len(verifications) > 0 and not verification_done)
+        or (run.status == "running" and phase == "pr_review" and show_merge_progress)
+    )
+    if verification_done or verification_in_progress:
+        return 4
+
+    pr_review_ready = (
+        phase == "pr_review"
+        or (run.status == "awaiting_approval" and phase != "local_development")
+        or has_open_prs
+        or has_post_merge
+    )
+    if pr_review_ready:
+        return 3
+
+    if phase in {
+        "ready_for_implementation",
+        "implementation",
+        "local_development",
+        "pr_review",
+        "completed",
+    } or _step_completed(run, "post_estimation"):
+        return 2
+
+    return 1
+
+
+def resolve_ui_active_step(
+    run: DeliveryRun,
+    phase: str | None = None,
+    ctx: dict | None = None,
+) -> int:
+    ctx = dict(ctx or run.context_data or {})
+    _hydrate_merge_flags_from_steps(run, ctx)
+    phase = phase or get_workflow_phase(run)
+    if ctx.get("beta_merged") or ctx.get("master_merged") or ctx.get("pending_deploy_retry"):
+        phase = "pr_review"
+
+    derived = _derive_ui_active_step(run, phase, ctx)
+    stored = ctx.get("ui_active_step")
+    if isinstance(stored, int) and 1 <= stored <= 4:
+        if derived < stored and phase in {
+            "estimation",
+            "waiting_for_info",
+            "ready_for_implementation",
+            "implementation",
+            "local_development",
+        }:
+            return derived
+        return max(stored, derived)
+    return derived
+
+
+def _touch_ui_active_step(run: DeliveryRun, step: str, status: str) -> None:
+    if status not in ("completed", "running"):
+        return
+    step_ui = PIPELINE_STEP_UI_STEP.get(step)
+    if not step_ui:
+        return
+    ctx = dict(run.context_data or {})
+    current = ctx.get("ui_active_step", 1)
+    if not isinstance(current, int):
+        current = 1
+    ctx["ui_active_step"] = max(current, step_ui)
+    run.context_data = ctx
+    flag_modified(run, "context_data")
 
 
 def _is_todo_status(status_name: str) -> bool:
@@ -172,7 +285,7 @@ def _jira_has_original_estimate(snapshot: dict) -> bool:
 
 def _estimation_was_posted(run: DeliveryRun) -> bool:
     phase = get_workflow_phase(run)
-    if phase in ("ready_for_implementation", "implementation", "pr_review", "completed"):
+    if phase in ("ready_for_implementation", "implementation", "local_development", "pr_review", "completed"):
         return True
     return _step_completed(run, "post_estimation")
 
@@ -697,6 +810,7 @@ REDEVELOPMENT_RESET_STEPS = frozenset({
     "cursor_development",
     "generate_code",
     "commit_changes",
+    "confirm_local_changes",
     "create_pr_beta",
     "create_pr_master",
     "code_revision",
@@ -719,6 +833,13 @@ def _invalidate_steps(run: DeliveryRun, steps: frozenset[str]) -> None:
     ]
 
 
+def _invalidate_generated_code_steps(run: DeliveryRun) -> None:
+    _invalidate_steps(
+        run,
+        frozenset({"commit_changes", "confirm_local_changes", "create_pr_beta", "create_pr_master"}),
+    )
+
+
 def reset_for_redevelopment(run: DeliveryRun, ctx: dict, *, notice: str = "") -> None:
     """Reset implementation/PR steps but keep estimation and the feature branch."""
     branch_name = run.branch_name or ctx.get("branch_name")
@@ -735,6 +856,7 @@ def reset_for_redevelopment(run: DeliveryRun, ctx: dict, *, notice: str = "") ->
         "impact_analysis": ctx.get("impact_analysis"),
         "impact_analysis_field": ctx.get("impact_analysis_field"),
         "branch_name": branch_name,
+        "ui_active_step": 2,
     }
     if notice.strip():
         preserved["workflow_notice"] = notice.strip()
@@ -841,6 +963,7 @@ async def _log_step(
         entry["data"] = data
     log.append(entry)
     run.steps_log = log
+    _touch_ui_active_step(run, step, status)
     run.updated_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(run)
@@ -1177,7 +1300,7 @@ async def start_implementation(
         return run
 
     phase = get_workflow_phase(run)
-    resuming = phase == "implementation" and run.status == "failed"
+    resuming = phase in ("implementation", "local_development") and run.status == "failed"
     if phase not in ("ready_for_implementation", "waiting_for_info") and not resuming:
         raise PipelineError("Complete estimation before starting implementation")
 
@@ -1185,6 +1308,15 @@ async def start_implementation(
     ctx = dict(run.context_data or {})
     if resuming:
         _hydrate_ctx_from_steps(run, ctx)
+
+    if _step_completed(run, "confirm_local_changes") and get_workflow_phase(run) == "local_development":
+        run.status = "running"
+        run.error_message = None
+        ctx["workflow_phase"] = "local_development"
+        run.context_data = ctx
+        await db.commit()
+        return await _complete_pr_creation(db, run, jira, ctx, session)
+
     run.status = "running"
     run.error_message = None
     ctx["workflow_phase"] = "implementation"
@@ -1241,72 +1373,31 @@ async def start_implementation(
             result = await _step_repo_stack(db, run, jira, ctx, session)
             await _complete_step(db, run, ctx, "repo_stack", result[0], result[1] or None)
 
-        if not _step_completed(run, "cursor_development"):
-            result = await _step_cursor_development(db, run, jira, ctx, session)
-            await _complete_step(db, run, ctx, "cursor_development", result[0], result[1] or None)
+        dev_automated = cursor_configured(session) or openai_configured(session)
+        if dev_automated:
+            if not _step_completed(run, "cursor_development"):
+                result = await _step_cursor_development(db, run, jira, ctx, session)
+                await _complete_step(db, run, ctx, "cursor_development", result[0], result[1] or None)
 
-        if (ctx.get("development_result") or {}).get("source") != "cursor_sdk":
-            if not _step_completed(run, "generate_code"):
-                result = await _step_generate_code(db, run, jira, ctx, session)
-                await _complete_step(db, run, ctx, "generate_code", result[0], result[1] or None)
-
-            if not _step_completed(run, "commit_changes"):
-                result = await _step_commit_changes(db, run, jira, ctx, session)
-                await _complete_step(db, run, ctx, "commit_changes", result[0], result[1] or None)
-
-        if not _step_completed(run, "create_pr_beta"):
-            result = await _step_create_pr_beta(db, run, jira, ctx, session)
-            await _complete_step(db, run, ctx, "create_pr_beta", result[0], result[1] or None)
-
-        if not _step_completed(run, "create_pr_master"):
-            result = await _step_create_pr_master(db, run, jira, ctx, session)
-            await _complete_step(db, run, ctx, "create_pr_master", result[0], result[1] or None)
-
-        mapping = ctx.get("mapping") or {}
-        branch_name = run.branch_name or ctx.get("branch_name")
-        if branch_name and mapping:
-            bitbucket = _bitbucket_client(session)
-            changed = await bitbucket.list_changed_files(
-                mapping["workspace"],
-                mapping["repo_slug"],
-                mapping["master_branch"],
-                branch_name,
+            if (ctx.get("development_result") or {}).get("source") != "cursor_sdk":
+                if not _step_completed(run, "generate_code"):
+                    result = await _step_generate_code(db, run, jira, ctx, session)
+                    await _complete_step(db, run, ctx, "generate_code", result[0], result[1] or None)
+        elif not _step_completed(run, "cursor_development"):
+            await _log_step(
+                db,
+                run,
+                "cursor_development",
+                "skipped",
+                "Develop changes in your local project, then create pull requests when ready",
             )
-            if changed:
-                ctx["changed_files"] = changed
-            elif (ctx.get("code_result") or {}).get("files"):
-                ctx["changed_files"] = [
-                    {"path": f["path"], "action": f.get("action", "modify")}
-                    for f in (ctx.get("code_result") or {}).get("files", [])
-                    if f.get("path")
-                ]
-            if ctx.get("changed_files"):
-                ctx["changed_files_refreshed_at"] = datetime.now(timezone.utc).isoformat()
 
-        ctx["workflow_phase"] = "pr_review"
-        run.context_data = ctx
-        run.status = "awaiting_approval"
+        await _prepare_local_development(db, run, ctx, session)
 
-        try:
-            beta_pr = ctx.get("beta_pr_url") or run.pr_url or "n/a"
-            master_pr = ctx.get("master_pr_url") or "n/a"
-            file_count = len(ctx.get("changed_files") or [])
-            await _jira_comment(
-                jira,
-                run.jira_issue_key,
-                f"[Delivery Manager] Implementation ready for review\n\n"
-                f"Branch: {run.branch_name}\n"
-                f"Beta PR: {beta_pr}\n"
-                f"Master PR: {master_pr}\n"
-                f"Files changed: {file_count}\n\n"
-                f"Approve and merge in Delivery Manager to deploy and verify websites.",
-            )
-        except Exception:
-            pass
+        if not _step_completed(run, "confirm_local_changes"):
+            return await _pause_for_local_confirmation(db, run, ctx)
 
-        await db.commit()
-        await db.refresh(run)
-        return run
+        return await _complete_pr_creation(db, run, jira, ctx, session)
 
     except PipelineError as exc:
         run.status = "failed"
@@ -1322,6 +1413,217 @@ async def start_implementation(
         await db.commit()
         await db.refresh(run)
         raise PipelineError(str(exc)) from exc
+
+
+async def _refresh_run_changed_files(
+    run: DeliveryRun,
+    ctx: dict,
+    session: dict,
+) -> None:
+    mapping = ctx.get("mapping") or {}
+    branch_name = run.branch_name or ctx.get("branch_name")
+    if not branch_name or not mapping or not bitbucket_configured(session):
+        return
+
+    bitbucket = _bitbucket_client(session)
+    changed = await bitbucket.list_changed_files(
+        mapping["workspace"],
+        mapping["repo_slug"],
+        mapping["master_branch"],
+        branch_name,
+    )
+    if changed:
+        ctx["changed_files"] = changed
+    elif (ctx.get("code_result") or {}).get("files"):
+        ctx["changed_files"] = [
+            {"path": f["path"], "action": f.get("action", "modify")}
+            for f in (ctx.get("code_result") or {}).get("files", [])
+            if f.get("path")
+        ]
+    if ctx.get("changed_files"):
+        ctx["changed_files_refreshed_at"] = datetime.now(timezone.utc).isoformat()
+
+
+def _populate_changed_files_from_code_result(ctx: dict) -> None:
+    files = (ctx.get("code_result") or {}).get("files") or []
+    if not files or ctx.get("changed_files"):
+        return
+    ctx["changed_files"] = [
+        {"path": f["path"], "action": f.get("action", "modify")}
+        for f in files
+        if isinstance(f, dict) and f.get("path")
+    ]
+    if ctx["changed_files"]:
+        ctx["changed_files_refreshed_at"] = datetime.now(timezone.utc).isoformat()
+
+
+async def _prepare_local_development(
+    db: AsyncSession,
+    run: DeliveryRun,
+    ctx: dict,
+    session: dict,
+) -> None:
+    """After code generation: surface changed files for review before opening pull requests."""
+    _populate_changed_files_from_code_result(ctx)
+    if _step_completed(run, "commit_changes"):
+        await _refresh_run_changed_files(run, ctx, session)
+    elif not ctx.get("changed_files"):
+        await _refresh_run_changed_files(run, ctx, session)
+        _populate_changed_files_from_code_result(ctx)
+
+    run.context_data = ctx
+    await db.commit()
+
+
+async def _commit_pending_changes(
+    db: AsyncSession,
+    run: DeliveryRun,
+    jira: JiraClient,
+    ctx: dict,
+    session: dict,
+) -> None:
+    """Commit generated changes to the feature branch via Bitbucket API."""
+    if _step_completed(run, "commit_changes"):
+        return
+
+    code_result = ctx.get("code_result") or {}
+    files = code_result.get("files") or []
+    if not files and _step_completed(run, "cursor_development") and not _step_completed(run, "generate_code"):
+        await _complete_step(
+            db,
+            run,
+            ctx,
+            "commit_changes",
+            "Changes committed on the feature branch by Cursor SDK",
+        )
+        return
+
+    result = await _step_commit_changes(db, run, jira, ctx, session)
+    await _complete_step(db, run, ctx, "commit_changes", result[0], result[1] or None)
+
+
+async def _pause_for_local_confirmation(
+    db: AsyncSession,
+    run: DeliveryRun,
+    ctx: dict,
+) -> DeliveryRun:
+    branch_name = run.branch_name or ctx.get("branch_name") or "feature branch"
+    ctx["workflow_phase"] = "local_development"
+    run.context_data = ctx
+    run.status = "awaiting_approval"
+    run.error_message = None
+    await _log_step(
+        db,
+        run,
+        "confirm_local_changes",
+        "running",
+        f"Branch `{branch_name}` is ready — review the generated changes, then create pull requests",
+    )
+    await db.commit()
+    await db.refresh(run)
+    return run
+
+
+async def _complete_pr_creation(
+    db: AsyncSession,
+    run: DeliveryRun,
+    jira: JiraClient,
+    ctx: dict,
+    session: dict,
+) -> DeliveryRun:
+    if not _step_completed(run, "create_pr_beta"):
+        result = await _step_create_pr_beta(db, run, jira, ctx, session)
+        await _complete_step(db, run, ctx, "create_pr_beta", result[0], result[1] or None)
+
+    if not _step_completed(run, "create_pr_master"):
+        result = await _step_create_pr_master(db, run, jira, ctx, session)
+        await _complete_step(db, run, ctx, "create_pr_master", result[0], result[1] or None)
+
+    await _refresh_run_changed_files(run, ctx, session)
+
+    ctx["workflow_phase"] = "pr_review"
+    run.context_data = ctx
+    run.status = "awaiting_approval"
+
+    try:
+        beta_pr = ctx.get("beta_pr_url") or run.pr_url or "n/a"
+        master_pr = ctx.get("master_pr_url") or "n/a"
+        file_count = len(ctx.get("changed_files") or [])
+        await _jira_comment(
+            jira,
+            run.jira_issue_key,
+            f"[Delivery Manager] Implementation ready for review\n\n"
+            f"Branch: {run.branch_name}\n"
+            f"Beta PR: {beta_pr}\n"
+            f"Master PR: {master_pr}\n"
+            f"Files changed: {file_count}\n\n"
+            f"Approve and merge in Delivery Manager to deploy and verify websites.",
+        )
+    except Exception:
+        pass
+
+    await db.commit()
+    await db.refresh(run)
+    return run
+
+
+async def create_prs_from_local(
+    db: AsyncSession,
+    run: DeliveryRun,
+    session: dict,
+) -> DeliveryRun:
+    if get_workflow_phase(run) != "local_development":
+        raise PipelineError("Run is not in local development")
+    if run.status == "running":
+        raise PipelineError("A step is already running")
+
+    jira = jira_client_from_session(session)
+    ctx = dict(run.context_data or {})
+    if _step_completed(run, "confirm_local_changes"):
+        run.status = "running"
+        run.error_message = None
+        await db.commit()
+        return await _complete_pr_creation(db, run, jira, ctx, session)
+
+    run.status = "running"
+    run.error_message = None
+    await db.commit()
+
+    try:
+        await _commit_pending_changes(db, run, jira, ctx, session)
+        await _refresh_run_changed_files(run, ctx, session)
+        branch_name = run.branch_name or ctx.get("branch_name")
+        file_count = len(ctx.get("changed_files") or [])
+        message = (
+            f"Ready to open pull requests for `{branch_name or 'feature branch'}`"
+            if file_count == 0
+            else f"Opening pull requests — {file_count} file(s) on `{branch_name}`"
+        )
+        await _complete_step(db, run, ctx, "confirm_local_changes", message)
+        return await _complete_pr_creation(db, run, jira, ctx, session)
+    except PipelineError as exc:
+        run.status = "awaiting_approval"
+        run.error_message = str(exc)
+        await _log_step(db, run, "confirm_local_changes", "failed", str(exc))
+        await db.commit()
+        await db.refresh(run)
+        raise
+    except Exception as exc:
+        run.status = "awaiting_approval"
+        run.error_message = str(exc)
+        await _log_step(db, run, "confirm_local_changes", "failed", str(exc))
+        await db.commit()
+        await db.refresh(run)
+        raise PipelineError(str(exc)) from exc
+
+
+async def confirm_local_and_create_prs(
+    db: AsyncSession,
+    run: DeliveryRun,
+    session: dict,
+) -> DeliveryRun:
+    """Backward-compatible alias for create_prs_from_local."""
+    return await create_prs_from_local(db, run, session)
 
 
 MergeTarget = Literal["beta", "master"]
@@ -2070,6 +2372,8 @@ async def retry_deployment(
 
     beta_pr_id, master_pr_id = _pr_ids_for_run(run, ctx)
     jira = jira_client_from_session(session)
+    ctx.pop("pending_deploy_retry", None)
+    run.context_data = ctx
     run.status = "running"
     run.error_message = None
     await db.commit()
@@ -2435,6 +2739,179 @@ async def _sync_pr_changed_files(
 
     await db.refresh(run)
     return run
+
+
+async def apply_local_code_revision(
+    db: AsyncSession,
+    run: DeliveryRun,
+    session: dict,
+    prompt: str,
+) -> DeliveryRun:
+    if get_workflow_phase(run) != "local_development":
+        raise PipelineError("Run is not in local development")
+    if run.status != "awaiting_approval":
+        raise PipelineError("Run is not awaiting approval")
+
+    revision_prompt = prompt.strip()
+    if not revision_prompt:
+        raise PipelineError("Revision prompt is required")
+    if not openai_configured(session):
+        raise PipelineError("OpenAI API key is required for code revisions. Add it in Settings.")
+
+    ctx = dict(run.context_data or {})
+    mapping = await _resolve_run_mapping(db, run, ctx)
+    if mapping:
+        ctx["mapping"] = mapping
+    branch_name = run.branch_name or ctx.get("branch_name")
+    code_result = ctx.get("code_result") or {}
+    files = code_result.get("files") or []
+    changed_files = ctx.get("changed_files") or []
+
+    if not files and not changed_files:
+        raise PipelineError("No generated code to revise yet. Start implementation first.")
+
+    revision_count = int(ctx.get("local_revision_count", 0)) + 1
+    run.status = "running"
+    run.error_message = None
+    await _log_step(
+        db,
+        run,
+        "code_revision",
+        "running",
+        f"Local revision #{revision_count}: updating generated code…",
+    )
+    await _log_step(db, run, "revision_prepare", "running", "Loading current file contents…")
+    await db.commit()
+
+    try:
+        current_files = [
+            {
+                "path": f["path"],
+                "content": f["content"],
+                "action": f.get("action", "modify"),
+            }
+            for f in files
+            if isinstance(f, dict) and f.get("path") and f.get("content") is not None
+        ]
+        if not current_files and changed_files and mapping and branch_name and bitbucket_configured(session):
+            bitbucket = _bitbucket_client(session)
+            current_files = await _load_branch_file_contents(
+                bitbucket, mapping, branch_name, changed_files, ctx
+            )
+
+        if not current_files:
+            raise PipelineError("No file contents available to revise")
+
+        await _log_step(
+            db,
+            run,
+            "revision_prepare",
+            "completed",
+            f"Ready to revise {len(current_files)} file(s)",
+        )
+
+        if not ctx.get("repo_stack_summary") and mapping and bitbucket_configured(session):
+            bitbucket = _bitbucket_client(session)
+            summary, _loaded = await probe_repository_stack(
+                bitbucket,
+                mapping["workspace"],
+                mapping["repo_slug"],
+                branch_name or mapping["master_branch"],
+            )
+            ctx["repo_stack_summary"] = summary
+
+        await _log_step(db, run, "revision_generate", "running", "Generating changes with AI…")
+        await db.commit()
+
+        rules = (mapping.get("rules") or "").strip() if mapping else ""
+        skills = (mapping.get("skills") or "").strip() if mapping else ""
+        openai = _openai_client(session)
+        revised = await openai.apply_code_revision(
+            run.jira_issue_key,
+            ctx.get("summary", run.summary),
+            revision_prompt,
+            current_files,
+            branch_paths=[f["path"] for f in current_files],
+            rules=rules,
+            skills=skills,
+            repo_stack_summary=ctx.get("repo_stack_summary", ""),
+        )
+        revised_files = revised.get("files", [])
+        file_map, deleted_paths = _partition_revision_files(revised_files)
+        if not file_map and not deleted_paths:
+            raise PipelineError("No file changes were generated for this revision")
+
+        notes = revised.get("implementation_notes", "")
+        _update_code_result_files(ctx, file_map, deleted_paths, notes)
+
+        change_parts: list[str] = []
+        if file_map:
+            change_parts.append(f"updated {len(file_map)} file(s)")
+        if deleted_paths:
+            change_parts.append(f"deleted {len(deleted_paths)} file(s)")
+        await _log_step(
+            db,
+            run,
+            "revision_generate",
+            "completed",
+            f"Generated changes: {', '.join(change_parts)}",
+        )
+
+        project_dir = (mapping.get("local_project_directory") or "").strip() if mapping else ""
+        await _log_step(
+            db,
+            run,
+            "revision_commit",
+            "completed",
+            "Updated generated code — create pull requests when ready",
+        )
+
+        _invalidate_generated_code_steps(run)
+        ctx["changed_files"] = [
+            {"path": f["path"], "action": f.get("action", "modify")}
+            for f in (ctx.get("code_result") or {}).get("files", [])
+            if isinstance(f, dict) and f.get("path")
+        ]
+        ctx["changed_files_refreshed_at"] = datetime.now(timezone.utc).isoformat()
+        ctx["local_revision_count"] = revision_count
+        ctx["last_revision_prompt"] = revision_prompt
+        ctx["workflow_phase"] = "local_development"
+
+        await _log_step(
+            db,
+            run,
+            "revision_refresh",
+            "completed",
+            f"Updated file list ({len(ctx['changed_files'])} changed file(s))",
+        )
+        await _log_step(
+            db,
+            run,
+            "code_revision",
+            "completed",
+            f"Local revision #{revision_count} generated\n\n{notes[:400]}",
+        )
+
+        run.status = "awaiting_approval"
+        run.context_data = ctx
+        await db.commit()
+        await db.refresh(run)
+        return run
+
+    except PipelineError as exc:
+        run.status = "awaiting_approval"
+        run.error_message = str(exc)
+        await _log_step(db, run, "code_revision", "failed", str(exc))
+        await db.commit()
+        await db.refresh(run)
+        raise
+    except Exception as exc:
+        run.status = "awaiting_approval"
+        run.error_message = str(exc)
+        await _log_step(db, run, "code_revision", "failed", str(exc))
+        await db.commit()
+        await db.refresh(run)
+        raise PipelineError(str(exc)) from exc
 
 
 async def apply_code_revision(
@@ -3154,6 +3631,7 @@ async def _step_resolve_mapping(db, run, jira, ctx) -> tuple[str, dict]:
         "master_website_url": mapping.master_website_url,
         "rules": mapping.rules,
         "skills": mapping.skills,
+        "local_project_directory": mapping.local_project_directory,
     }
     return (
         f"Repo: {mapping.bitbucket_workspace}/{mapping.bitbucket_repo_slug} "

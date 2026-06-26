@@ -11,6 +11,8 @@ export interface MeResponse {
   site_url: string;
   bitbucket_configured?: boolean;
   bitbucket_username?: string | null;
+  bitbucket_git_username?: string | null;
+  bitbucket_git_configured?: boolean;
   openai_configured?: boolean;
   openai_model?: string | null;
   cursor_configured?: boolean;
@@ -31,11 +33,15 @@ export interface BitbucketStatus {
   configured: boolean;
   username?: string | null;
   display_name?: string | null;
+  git_username?: string | null;
+  git_configured?: boolean;
 }
 
 export interface BitbucketConnectRequest {
   username: string;
   app_password: string;
+  git_username?: string;
+  git_password?: string;
 }
 
 export interface OpenAIStatus {
@@ -56,6 +62,12 @@ export interface OpenAIConnectRequest {
 export interface CursorConnectRequest {
   api_key: string;
   model: string;
+}
+
+export interface CredentialSecretResponse {
+  api_key?: string;
+  api_token?: string;
+  git_password?: string;
 }
 
 export interface ConnectRequest {
@@ -127,6 +139,7 @@ export interface Mapping {
   ssh_auth_type: "password" | "pem";
   ssh_use_sudo: boolean;
   project_root_directory: string;
+  local_project_directory: string;
   beta_post_pr_merge_commands: string;
   master_post_pr_merge_commands: string;
   beta_post_merge_shell_preview: string;
@@ -153,6 +166,7 @@ export interface MappingInput {
   ssh_auth_type: "password" | "pem";
   ssh_use_sudo: boolean;
   project_root_directory: string;
+  local_project_directory: string;
   beta_post_pr_merge_commands: string;
   master_post_pr_merge_commands: string;
 }
@@ -220,6 +234,7 @@ export interface DeploymentAttempt {
   status: string;
   started_at: string;
   completed_at: string | null;
+  planned_commands: string[];
   commands: DeploymentCommand[];
   output: string | null;
   error: string | null;
@@ -234,6 +249,7 @@ export interface DeliveryRun {
   status: string;
   workflow_phase: string;
   workflow_phase_label: string;
+  ui_active_step: number;
   jira_status: string | null;
   current_step: string | null;
   next_step: string | null;
@@ -252,6 +268,7 @@ export interface DeliveryRun {
   changed_files: ChangedFile[];
   changed_files_refreshed_at: string | null;
   branch_name: string | null;
+  local_project_directory: string | null;
   pr_url: string | null;
   pr_id: number | null;
   beta_pr_url: string | null;
@@ -352,6 +369,8 @@ export const api = {
     }),
   disconnectBitbucket: () =>
     request<{ ok: boolean; configured: boolean }>("/api/auth/bitbucket", { method: "DELETE" }),
+  revealBitbucketSecret: () => request<CredentialSecretResponse>("/api/auth/bitbucket/secret"),
+  revealBitbucketGitSecret: () => request<CredentialSecretResponse>("/api/auth/bitbucket/git-secret"),
   getOpenAIStatus: () => request<OpenAIStatus>("/api/auth/openai"),
   connectOpenAI: (body: OpenAIConnectRequest) =>
     request<OpenAIStatus & { ok: boolean }>("/api/auth/openai", {
@@ -360,6 +379,7 @@ export const api = {
     }),
   disconnectOpenAI: () =>
     request<{ ok: boolean; configured: boolean }>("/api/auth/openai", { method: "DELETE" }),
+  revealOpenAISecret: () => request<CredentialSecretResponse>("/api/auth/openai/secret"),
   getOpenAIModels: (apiKey?: string) => {
     const params = apiKey?.trim() ? `?api_key=${encodeURIComponent(apiKey.trim())}` : "";
     return request<ModelsListResponse>(`/api/auth/openai/models${params}`);
@@ -372,6 +392,7 @@ export const api = {
     }),
   disconnectCursor: () =>
     request<{ ok: boolean; configured: boolean }>("/api/auth/cursor", { method: "DELETE" }),
+  revealCursorSecret: () => request<CredentialSecretResponse>("/api/auth/cursor/secret"),
   getCursorModels: (apiKey?: string) => {
     const params = apiKey?.trim() ? `?api_key=${encodeURIComponent(apiKey.trim())}` : "";
     return request<ModelsListResponse>(`/api/auth/cursor/models${params}`);
@@ -446,6 +467,10 @@ export const api = {
     }),
   startImplementation: (id: string) =>
     request<DeliveryRun>(`/api/runs/${id}/start-implementation`, { method: "POST" }),
+  createPrs: (id: string) =>
+    request<DeliveryRun>(`/api/runs/${id}/create-prs`, { method: "POST" }),
+  confirmLocalChanges: (id: string) =>
+    request<DeliveryRun>(`/api/runs/${id}/confirm-local-changes`, { method: "POST" }),
   mergeRun: (id: string) =>
     request<DeliveryRun>(`/api/runs/${id}/merge`, { method: "POST" }),
   mergeBetaRun: (id: string) =>

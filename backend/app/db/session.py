@@ -96,6 +96,11 @@ async def init_db() -> None:
         )
         await conn.execute(
             text(
+                "ALTER TABLE project_repo_mappings ADD COLUMN IF NOT EXISTS local_project_directory VARCHAR(512) NOT NULL DEFAULT ''"
+            )
+        )
+        await conn.execute(
+            text(
                 "ALTER TABLE project_repo_mappings ADD COLUMN IF NOT EXISTS post_pr_merge_command TEXT NOT NULL DEFAULT ''"
             )
         )
@@ -126,6 +131,7 @@ async def init_db() -> None:
                     ssh_private_key_encrypted = COALESCE(ssh_private_key_encrypted, ''),
                     ssh_auth_type = COALESCE(NULLIF(ssh_auth_type, ''), 'password'),
                     project_root_directory = COALESCE(project_root_directory, ''),
+                    local_project_directory = COALESCE(local_project_directory, ''),
                     post_pr_merge_command = COALESCE(post_pr_merge_command, ''),
                     beta_post_pr_merge_command = COALESCE(
                         NULLIF(beta_post_pr_merge_command, ''),
@@ -170,6 +176,16 @@ async def init_db() -> None:
         await conn.execute(
             text(
                 "ALTER TABLE user_credentials ADD COLUMN IF NOT EXISTS jira_cloud_id VARCHAR(128)"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE user_credentials ADD COLUMN IF NOT EXISTS bitbucket_git_username VARCHAR(128)"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE user_credentials ADD COLUMN IF NOT EXISTS bitbucket_git_password_encrypted TEXT"
             )
         )
 

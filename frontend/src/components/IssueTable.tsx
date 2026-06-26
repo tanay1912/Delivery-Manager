@@ -9,7 +9,6 @@ interface IssueTableProps {
   maxResults: number;
   hasNext: boolean;
   siteUrl?: string;
-  deliveringKey?: string | null;
   onNextPage: () => void;
   onPreviousPage: () => void;
   onDeliver?: (issue: Issue) => void;
@@ -64,8 +63,8 @@ const ACTION_BTN_BASE =
 function deliverAction(status?: string): { label: string; showArrow: boolean; className: string } {
   const s = (status || "").toLowerCase().trim();
 
-  const startDelivery = `${ACTION_BTN_BASE} bg-brand-600 text-white hover:bg-brand-700 focus-visible:ring-brand-500`;
-  const continueStyle = `${ACTION_BTN_BASE} border border-brand-400 text-brand-600 bg-transparent hover:bg-brand-50 focus-visible:ring-brand-400`;
+  const startDelivery = `${ACTION_BTN_BASE} bg-blue-600 text-white hover:bg-blue-700 focus-visible:ring-blue-500`;
+  const continueStyle = `${ACTION_BTN_BASE} border border-blue-400 text-blue-600 bg-transparent hover:bg-blue-50 focus-visible:ring-blue-400`;
   const reviewPr = `${ACTION_BTN_BASE} bg-blue-600 text-white hover:bg-blue-700 focus-visible:ring-blue-500`;
   const verify = `${ACTION_BTN_BASE} bg-amber-500 text-white hover:bg-amber-600 focus-visible:ring-amber-500`;
   const viewSummary = `${ACTION_BTN_BASE} border border-slate-300 text-slate-400 bg-transparent hover:bg-slate-50 focus-visible:ring-slate-400`;
@@ -115,7 +114,6 @@ export default function IssueTable({
   maxResults,
   hasNext,
   siteUrl,
-  deliveringKey,
   onNextPage,
   onPreviousPage,
   onDeliver,
@@ -165,7 +163,7 @@ export default function IssueTable({
                     href={siteUrl ? `${siteUrl}/browse/${issue.key}` : `#`}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="font-mono text-sm font-medium text-brand-600 hover:text-brand-800 transition-colors"
+                    className="font-mono text-sm font-medium text-blue-600 hover:text-blue-800 transition-colors"
                   >
                     {issue.key}
                   </a>
@@ -211,11 +209,10 @@ export default function IssueTable({
                   <td className="px-6 py-3.5 text-right border-b border-slate-100">
                     <button
                       onClick={() => onDeliver(issue)}
-                      disabled={deliveringKey === issue.key}
                       className={action.className}
                     >
-                      {deliveringKey === issue.key ? "Opening…" : action.label}
-                      {deliveringKey !== issue.key && action.showArrow && <DeliverArrow />}
+                      {action.label}
+                      {action.showArrow && <DeliverArrow />}
                     </button>
                   </td>
                 )}

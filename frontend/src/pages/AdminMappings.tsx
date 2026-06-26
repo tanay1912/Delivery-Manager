@@ -22,6 +22,7 @@ const emptyForm = {
   ssh_auth_type: "password" as "password" | "pem",
   ssh_use_sudo: false,
   project_root_directory: "",
+  local_project_directory: "",
   beta_post_pr_merge_commands: [""] as string[],
   master_post_pr_merge_commands: [""] as string[],
 };
@@ -106,6 +107,7 @@ function mappingToForm(mapping: Mapping) {
     ssh_auth_type: mapping.ssh_auth_type,
     ssh_use_sudo: mapping.ssh_use_sudo,
     project_root_directory: mapping.project_root_directory,
+    local_project_directory: mapping.local_project_directory,
     beta_post_pr_merge_commands: commandsFromStorage(mapping.beta_post_pr_merge_commands),
     master_post_pr_merge_commands: commandsFromStorage(mapping.master_post_pr_merge_commands),
   };
@@ -349,6 +351,7 @@ export default function AdminMappings() {
       ssh_auth_type: form.ssh_auth_type,
       ssh_use_sudo: form.ssh_use_sudo,
       project_root_directory: form.project_root_directory,
+      local_project_directory: form.local_project_directory,
       beta_post_pr_merge_commands: commandsToStorage(form.beta_post_pr_merge_commands),
       master_post_pr_merge_commands: commandsToStorage(form.master_post_pr_merge_commands),
     };
@@ -359,14 +362,17 @@ export default function AdminMappings() {
       payload.ssh_private_key = form.ssh_private_key.trim();
     }
     try {
-      if (editingId) {
-        await api.updateMapping(editingId, payload);
-      } else {
-        await api.createMapping(payload);
-      }
+      const wasEditing = Boolean(editingId);
+      const savedMapping = wasEditing
+        ? await api.updateMapping(editingId!, payload)
+        : await api.createMapping(payload);
       await loadMappings();
-      applyProjectSelection(savedKey);
-      toast(editingId ? "Mapping updated." : "Mapping created.", "success");
+      setSelectedProjectKey(savedKey);
+      setEditingId(savedMapping.id);
+      setForm(mappingToForm(savedMapping));
+      setSshPasswordConfigured(savedMapping.ssh_password_configured);
+      setSshPrivateKeyConfigured(savedMapping.ssh_private_key_configured);
+      toast(wasEditing ? "Mapping updated." : "Mapping created.", "success");
     } catch (err) {
       handleAuthError(err);
     } finally {
@@ -1057,6 +1063,20 @@ export default function AdminMappings() {
                           )}
 
                           <label className="block space-y-1.5">
+                            <span className="label">Local project directory</span>
+                            <input
+                              type="text"
+                              placeholder="/var/www/html/myproject"
+                              value={form.local_project_directory}
+                              onChange={(e) => setForm({ ...form, local_project_directory: e.target.value })}
+                              className="input font-mono"
+                            />
+                            <span className="text-xs text-slate-500">
+                              Path to this repo on your development machine. Shown in delivery workflow git commands.
+                            </span>
+                          </label>
+
+                          <label className="block space-y-1.5">
                             <span className="label">Project root directory</span>
                             <input
                               type="text"
@@ -1112,11 +1132,13 @@ export default function AdminMappings() {
                                 <div>
                                   <span className="label">{section.title}</span>
                                   <p className="text-xs text-slate-500 mt-0.5">
-                                    {section.description} Each command runs in order after{" "}
+                                    {section.description}                                     Each command runs in order after{" "}
                                     <code className="text-[11px] bg-slate-100 px-1 py-0.5 rounded">
                                       cd {form.project_root_directory.trim() || "<project root>"}
                                     </code>
-                                    . Do not include <code className="text-[11px]">cd</code> here.
+                                    . Do not include <code className="text-[11px]">cd</code> here.{" "}
+                                    For <code className="text-[11px]">docker exec</code>, omit{" "}
+                                    <code className="text-[11px]">-it</code> — commands run non-interactively over SSH.
                                   </p>
                                 </div>
 

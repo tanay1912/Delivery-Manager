@@ -42,6 +42,7 @@ def mapping_to_response(mapping: ProjectRepoMapping) -> MappingResponse:
         ssh_auth_type=mapping.ssh_auth_type or "password",
         ssh_use_sudo=bool(mapping.ssh_use_sudo),
         project_root_directory=mapping.project_root_directory,
+        local_project_directory=mapping.local_project_directory,
         beta_post_pr_merge_commands=mapping.beta_post_pr_merge_command,
         master_post_pr_merge_commands=mapping.master_post_pr_merge_command,
         beta_post_merge_shell_preview=build_post_merge_shell_script(

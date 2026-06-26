@@ -22,6 +22,7 @@ class MappingCreate(BaseModel):
     ssh_auth_type: str = Field(default="password", pattern="^(password|pem)$")
     ssh_use_sudo: bool = False
     project_root_directory: str = Field(default="", max_length=512)
+    local_project_directory: str = Field(default="", max_length=512)
     beta_post_pr_merge_commands: str = Field(default="", max_length=50000)
     master_post_pr_merge_commands: str = Field(default="", max_length=50000)
 
@@ -54,6 +55,7 @@ class MappingUpdate(BaseModel):
     ssh_auth_type: str | None = Field(default=None, pattern="^(password|pem)$")
     ssh_use_sudo: bool | None = None
     project_root_directory: str | None = Field(default=None, max_length=512)
+    local_project_directory: str | None = Field(default=None, max_length=512)
     beta_post_pr_merge_commands: str | None = Field(default=None, max_length=50000)
     master_post_pr_merge_commands: str | None = Field(default=None, max_length=50000)
 
@@ -91,6 +93,7 @@ class MappingResponse(BaseModel):
     ssh_auth_type: str
     ssh_use_sudo: bool
     project_root_directory: str
+    local_project_directory: str
     beta_post_pr_merge_commands: str
     master_post_pr_merge_commands: str
     beta_post_merge_shell_preview: str

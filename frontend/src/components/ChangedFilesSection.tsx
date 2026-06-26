@@ -16,14 +16,16 @@ interface ChangedFilesSectionProps {
   files: ChangedFile[];
   selectedPath: string | null;
   onSelect: (file: ChangedFile | null) => void;
+  defaultExpanded?: boolean;
 }
 
 export default function ChangedFilesSection({
   files,
   selectedPath,
   onSelect,
+  defaultExpanded = false,
 }: ChangedFilesSectionProps) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(defaultExpanded);
 
   if (files.length === 0) return null;
 

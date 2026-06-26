@@ -7,14 +7,50 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ProjectRepoMapping
 
-_GIT_AUTH_COMMAND = re.compile(
-    r"^git\s+(pull|fetch|clone|push|submodule\s+update)\b",
+_GIT_AUTH_SUBCOMMAND = re.compile(
+    r"\bgit(?:\s+-[^\s=]+(?:=[^\s]+)?)*\s+(?:pull|fetch|clone|push|submodule\s+update)\b",
     re.IGNORECASE,
+)
+
+_GIT_AUTH_FAILURE_PATTERNS = (
+    re.compile(r"could not read (?:Username|Password)", re.IGNORECASE),
+    re.compile(r"terminal prompts disabled", re.IGNORECASE),
+    re.compile(r"Authentication failed", re.IGNORECASE),
+    re.compile(r"Invalid username or password", re.IGNORECASE),
+    re.compile(r"Username for ['\"]", re.IGNORECASE),
+    re.compile(r"HTTP Basic: Access denied", re.IGNORECASE),
+    re.compile(r"Permission denied \(publickey\)", re.IGNORECASE),
+    re.compile(r"change-3222", re.IGNORECASE),
+    re.compile(r"app passwords are deprecated", re.IGNORECASE),
+    re.compile(r"returned error: 410", re.IGNORECASE),
+)
+
+
+_DOCKER_EXEC = re.compile(r"\bdocker(?:\s+compose)?\s+exec\b", re.IGNORECASE)
+_DOCKER_TTY_FLAG = re.compile(r"^\s+(?:-[it]+\b|--(?:tty|interactive)\b)", re.IGNORECASE)
+_TTY_FAILURE_PATTERNS = (
+    re.compile(r"not a tty", re.IGNORECASE),
+    re.compile(r"the input device is not a tty", re.IGNORECASE),
 )
 
 
 def parse_post_pr_merge_commands(raw: str) -> list[str]:
     return [line.strip() for line in raw.splitlines() if line.strip()]
+
+
+def strip_docker_tty_flags(command: str) -> str:
+    """Remove -i/-t from docker exec; SSH deploy runs without a TTY."""
+    match = _DOCKER_EXEC.search(command)
+    if not match:
+        return command
+    before = command[: match.end()]
+    after = command[match.end() :]
+    while True:
+        stripped = _DOCKER_TTY_FLAG.sub("", after, count=1)
+        if stripped == after:
+            break
+        after = stripped
+    return before + after
 
 
 def build_post_merge_shell_script(
@@ -37,7 +73,40 @@ def build_post_merge_shell_script(
 
 
 def command_needs_bitbucket_auth(command: str) -> bool:
-    return bool(_GIT_AUTH_COMMAND.match(command.strip()))
+    return bool(_GIT_AUTH_SUBCOMMAND.search(command.strip()))
+
+
+def is_git_auth_failure(detail: str) -> bool:
+    return any(pattern.search(detail) for pattern in _GIT_AUTH_FAILURE_PATTERNS)
+
+
+def is_tty_failure(detail: str) -> bool:
+    return any(pattern.search(detail) for pattern in _TTY_FAILURE_PATTERNS)
+
+
+def format_deploy_command_failure(command: str, detail: str) -> str:
+    display_command = command.strip()
+    if is_git_auth_failure(detail):
+        if re.search(r"change-3222|app passwords are deprecated|error: 410", detail, re.IGNORECASE):
+            return (
+                f"Git authentication failed while running `{display_command}`. "
+                "Bitbucket app passwords no longer work for git pull. "
+                "In Settings → Bitbucket, connect with your Atlassian account email and a "
+                "Bitbucket API token (create one at id.atlassian.com, select Bitbucket, "
+                "enable repository read/write scopes). Clear any separate Git credentials "
+                "that still use an app password, then retry deployment."
+            )
+        return (
+            f"Git authentication failed while running `{display_command}`. "
+            "Add your Atlassian account email and Bitbucket API token in Settings, "
+            "then retry deployment."
+        )
+    if is_tty_failure(detail):
+        return (
+            f"Deployment command failed ({display_command}): {detail}. "
+            "Remove -it or -t from docker exec commands — deployment runs non-interactively over SSH."
+        )
+    return f"Deployment command failed ({display_command}): {detail}"
 
 
 def commands_need_bitbucket_auth(commands: list[str]) -> bool:
@@ -53,10 +122,13 @@ def apply_bitbucket_auth_to_command(command: str, username: str, password: str) 
         f"!f() {{ echo username={shlex.quote(username)}; "
         f"echo password={shlex.quote(password)}; }}; f"
     )
-    git_args = stripped[4:].lstrip()
-    return (
-        f"GIT_TERMINAL_PROMPT=0 git -c credential.helper={shlex.quote(helper)} {git_args}"
-    )
+    git_prefix = f"GIT_TERMINAL_PROMPT=0 git -c credential.helper={shlex.quote(helper)}"
+    match = re.search(r"\bgit\b", stripped, re.IGNORECASE)
+    if not match:
+        return command
+    before = stripped[: match.start()]
+    after = stripped[match.end() :].lstrip()
+    return f"{before}{git_prefix} {after}".strip()
 
 
 def deploy_commands_for_environment(

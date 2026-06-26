@@ -27,13 +27,13 @@ function StepCircle({ number, status }: { number: number; status: StepStatus }) 
   }
   if (status === "active") {
     return (
-      <span className="flex h-10 w-10 items-center justify-center rounded-full bg-brand-600 text-white text-sm font-bold shadow-brand ring-2 ring-purple-300 ring-offset-2 animate-pulse">
+      <span className="flex h-10 w-10 items-center justify-center rounded-full bg-blue-600 text-white text-sm font-bold shadow-sm ring-2 ring-blue-300 ring-offset-2 animate-pulse">
         {number}
       </span>
     );
   }
   return (
-    <span className="flex h-10 w-10 items-center justify-center rounded-full border-2 border-brand-200 bg-white text-sm font-semibold text-brand-400">
+    <span className="flex h-10 w-10 items-center justify-center rounded-full border-2 border-blue-200 bg-white text-sm font-semibold text-blue-400">
       {number}
     </span>
   );
@@ -42,7 +42,7 @@ function StepCircle({ number, status }: { number: number; status: StepStatus }) 
 function Connector({ completed }: { completed: boolean }) {
   return (
     <div
-      className={`flex-1 h-0.5 min-w-[1rem] ${completed ? "bg-emerald-500" : "bg-brand-100"}`}
+      className={`flex-1 h-0.5 min-w-[1rem] ${completed ? "bg-emerald-500" : "bg-blue-100"}`}
       aria-hidden="true"
     />
   );
@@ -63,7 +63,7 @@ export default function PipelineStepper({ steps }: PipelineStepperProps) {
                 <span
                   className={`mt-2 text-sm text-center max-w-[5rem] sm:max-w-[7rem] leading-tight ${
                     step.status === "active"
-                      ? "font-bold text-brand-600"
+                      ? "font-bold text-blue-600"
                       : step.status === "completed"
                         ? "text-green-600"
                         : "text-slate-400"

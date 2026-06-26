@@ -1,32 +1,52 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   api,
   ApiError,
   Issue,
   IssueSummary as IssueSummaryData,
-  Project,
   User,
 } from "../api/client";
 import IssueSummary from "../components/IssueSummary";
 import IssueTable from "../components/IssueTable";
 import Layout from "../components/Layout";
 import ProjectList from "../components/ProjectList";
+import {
+  DashboardProjectProvider,
+  useDashboardProjects,
+} from "../context/DashboardProjectContext";
 import { useToast } from "../context/ToastContext";
 
-export default function Dashboard() {
+function RefreshIcon({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth={2}
+        d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+      />
+    </svg>
+  );
+}
+
+function DashboardContent() {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const {
+    projects,
+    selectedProject,
+    projectsLoading,
+    projectsTotal,
+    mappedProjectKeys,
+    onSelect,
+    onSearch,
+  } = useDashboardProjects()!;
+
   const [user, setUser] = useState<User | null>(null);
   const [siteName, setSiteName] = useState("");
   const [siteUrl, setSiteUrl] = useState("");
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [mappedProjectKeys, setMappedProjectKeys] = useState<Set<string>>(new Set());
-  const [projectsTotal, setProjectsTotal] = useState(0);
   const [issues, setIssues] = useState<Issue[]>([]);
-  const [selectedProject, setSelectedProject] = useState<string | null>(null);
-  const [projectsLoading, setProjectsLoading] = useState(true);
-  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [issuesLoading, setIssuesLoading] = useState(true);
   const [summary, setSummary] = useState<IssueSummaryData | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(true);
@@ -35,7 +55,7 @@ export default function Dashboard() {
   const [pageIndex, setPageIndex] = useState(0);
   const [hasNext, setHasNext] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [deliveringKey, setDeliveringKey] = useState<string | null>(null);
+  const [reloadingTickets, setReloadingTickets] = useState(false);
 
   const handleAuthError = useCallback(
     (err: unknown) => {
@@ -60,36 +80,10 @@ export default function Dashboard() {
       .catch(handleAuthError);
   }, [handleAuthError]);
 
-  const loadMappedProjects = useCallback(
-    (query?: string) => {
-      setProjectsLoading(true);
-      Promise.all([api.getAllProjects(query), api.getMappings()])
-        .then(([all, mappingsData]) => {
-          const keys = new Set(mappingsData.mappings.map((m) => m.jira_project_key));
-          setMappedProjectKeys(keys);
-          const configured = all.filter((p) => keys.has(p.key));
-          setProjects(configured);
-          setProjectsTotal(configured.length);
-        })
-        .catch(handleAuthError)
-        .finally(() => setProjectsLoading(false));
-    },
-    [handleAuthError],
-  );
-
   useEffect(() => {
-    loadMappedProjects();
-  }, [loadMappedProjects]);
-
-  const handleProjectSearch = useCallback(
-    (query: string) => {
-      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
-      searchDebounceRef.current = setTimeout(() => {
-        loadMappedProjects(query.trim() || undefined);
-      }, 300);
-    },
-    [loadMappedProjects],
-  );
+    setPageIndex(0);
+    setPageTokens([null]);
+  }, [selectedProject]);
 
   const loadSummary = useCallback(
     (project: string | null) => {
@@ -141,22 +135,12 @@ export default function Dashboard() {
     loadIssues(selectedProject, pageTokens[pageIndex] ?? null, pageIndex);
   }, [selectedProject, pageIndex, loadIssues]);
 
-  const handleProjectSelect = (key: string | null) => {
-    setSelectedProject(key);
-    setPageIndex(0);
-    setPageTokens([null]);
-  };
-
   const handleNextPage = () => {
-    if (hasNext) {
-      setPageIndex((prev) => prev + 1);
-    }
+    if (hasNext) setPageIndex((prev) => prev + 1);
   };
 
   const handlePreviousPage = () => {
-    if (pageIndex > 0) {
-      setPageIndex((prev) => prev - 1);
-    }
+    if (pageIndex > 0) setPageIndex((prev) => prev - 1);
   };
 
   const handleLogout = async () => {
@@ -167,19 +151,38 @@ export default function Dashboard() {
     }
   };
 
-  const handleDeliver = async (issue: Issue) => {
-    setDeliveringKey(issue.key);
+  const handleReloadTickets = useCallback(async () => {
+    setReloadingTickets(true);
     setError(null);
+    const token = pageTokens[pageIndex] ?? null;
     try {
-      const run = await api.startRun(issue.key);
-      navigate(`/deliver/${issue.key}`, { state: { run } });
+      const [summaryData, issuesData] = await Promise.all([
+        api.getIssueSummary(selectedProject ?? undefined),
+        api.getIssues(selectedProject ?? undefined, token ?? undefined),
+      ]);
+      setSummary(summaryData);
+      setIssues(issuesData.issues);
+      setIssuesTotal(issuesData.total);
+      setHasNext(!issuesData.is_last && Boolean(issuesData.next_page_token));
+      if (issuesData.next_page_token) {
+        setPageTokens((prev) => {
+          const next = [...prev];
+          next[pageIndex + 1] = issuesData.next_page_token ?? null;
+          return next;
+        });
+      }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to start delivery run";
-      setError(msg);
-      toast(msg, "error");
+      handleAuthError(err);
     } finally {
-      setDeliveringKey(null);
+      setReloadingTickets(false);
     }
+  }, [selectedProject, pageIndex, pageTokens, handleAuthError]);
+
+  const handleDeliver = (issue: Issue) => {
+    setError(null);
+    navigate(`/deliver/${issue.key}`, {
+      state: { starting: true, issueSummary: issue.summary },
+    });
   };
 
   const selectedProjectName =
@@ -189,7 +192,7 @@ export default function Dashboard() {
 
   return (
     <Layout user={user} siteName={siteName} onLogout={handleLogout}>
-      <div className="w-full px-4 sm:px-6 lg:px-8 py-6 h-[calc(100vh-4rem)] flex flex-col">
+      <div className="w-full px-4 sm:px-6 lg:px-8 py-6 h-[calc(100vh-3.5rem)] flex flex-col">
         {error && (
           <div className="alert-error mb-4 flex-shrink-0 flex items-start gap-3">
             <svg className="h-5 w-5 flex-shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
@@ -203,71 +206,87 @@ export default function Dashboard() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-5 lg:gap-6 flex-1 min-h-0">
-          <aside className="lg:col-span-1 flex flex-col min-h-0">
-            <div className="card overflow-hidden flex flex-col h-full min-h-0 bg-slate-50/70 border-r border-slate-200/90 shadow-sm">
-              <div className="px-5 py-4 border-b border-slate-200/80 bg-slate-100/50 flex-shrink-0">
-                <h2 className="font-semibold text-slate-900 tracking-tight">Projects</h2>
-                <p className="text-xs text-slate-500 mt-0.5 font-normal">
-                  {projectsLoading && projects.length === 0
-                    ? "Loading..."
-                    : `${projectsTotal} with Bitbucket`}
-                </p>
-              </div>
-              <ProjectList
-                projects={projects}
-                selectedKey={selectedProject}
-                loading={projectsLoading}
-                total={projectsTotal}
-                onSelect={handleProjectSelect}
-                onSearch={handleProjectSearch}
-                emptyMessage={
-                  mappedProjectKeys.size === 0
-                    ? "No projects are linked to Bitbucket yet."
-                    : "No configured projects match your search."
-                }
-                configureHref="/admin/mappings"
-                showMappingSettings
-              />
+        {/* Mobile project filter — sidebar list is hidden below lg */}
+        <div className="lg:hidden mb-4 flex-shrink-0">
+          <div className="card overflow-hidden max-h-64 flex flex-col">
+            <div className="px-4 py-3 border-b border-slate-100 bg-slate-50/80 flex-shrink-0">
+              <h2 className="text-sm font-semibold text-slate-900">Configured projects</h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {projectsLoading ? "Loading..." : `${projectsTotal} linked to Bitbucket`}
+              </p>
             </div>
-          </aside>
-
-          <section className="lg:col-span-4 flex flex-col min-h-0">
-            <IssueSummary
-              summary={summary}
-              loading={summaryLoading}
-              projectLabel={selectedProjectName}
+            <ProjectList
+              projects={projects}
+              selectedKey={selectedProject}
+              loading={projectsLoading}
+              total={projectsTotal}
+              onSelect={onSelect}
+              onSearch={onSearch}
+              emptyMessage={
+                mappedProjectKeys.size === 0
+                  ? "No projects are linked to Bitbucket yet."
+                  : "No configured projects match your search."
+              }
+              configureHref="/settings"
+              showMappingSettings
             />
+          </div>
+        </div>
 
-            <div className="card overflow-hidden flex flex-col flex-1 min-h-0">
-              <div className="card-header flex items-center justify-between flex-shrink-0">
-                <div>
-                  <h2 className="card-title">My tickets</h2>
-                  <p className="card-subtitle">Assigned to you · sorted by last updated</p>
-                </div>
+        <div className="flex flex-col min-h-0 flex-1">
+          <IssueSummary
+            summary={summary}
+            loading={summaryLoading}
+            projectLabel={selectedProjectName}
+          />
+
+          <div className="card overflow-hidden flex flex-col flex-1 min-h-0 mt-5">
+            <div className="card-header flex items-center justify-between flex-shrink-0">
+              <div>
+                <h2 className="card-title">My tickets</h2>
+                <p className="card-subtitle">Assigned to you · sorted by last updated</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleReloadTickets}
+                  disabled={reloadingTickets || issuesLoading}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-gray-100 disabled:opacity-50 transition-colors"
+                  title="Reload tickets from Jira"
+                >
+                  <RefreshIcon className={`h-3.5 w-3.5 ${reloadingTickets ? "animate-spin" : ""}`} />
+                  {reloadingTickets ? "Reloading…" : "Reload"}
+                </button>
                 {!issuesLoading && (
                   <span className="badge-neutral tabular-nums">{issuesTotal} total</span>
                 )}
               </div>
-              <div className="flex-1 min-h-0 overflow-auto">
-                <IssueTable
-                  issues={issues}
-                  loading={issuesLoading}
-                  total={issuesTotal}
-                  pageIndex={pageIndex}
-                  maxResults={50}
-                  hasNext={hasNext}
-                  siteUrl={siteUrl}
-                  deliveringKey={deliveringKey}
-                  onDeliver={handleDeliver}
-                  onNextPage={handleNextPage}
-                  onPreviousPage={handlePreviousPage}
-                />
-              </div>
             </div>
-          </section>
+            <div className="flex-1 min-h-0 overflow-auto">
+              <IssueTable
+                issues={issues}
+                loading={issuesLoading}
+                total={issuesTotal}
+                pageIndex={pageIndex}
+                maxResults={50}
+                hasNext={hasNext}
+                siteUrl={siteUrl}
+                onDeliver={handleDeliver}
+                onNextPage={handleNextPage}
+                onPreviousPage={handlePreviousPage}
+              />
+            </div>
+          </div>
         </div>
       </div>
     </Layout>
+  );
+}
+
+export default function Dashboard() {
+  return (
+    <DashboardProjectProvider>
+      <DashboardContent />
+    </DashboardProjectProvider>
   );
 }
