@@ -133,9 +133,12 @@ Server environment variables (`JIRA_IMPACT_ANALYSIS_FIELD`, `JIRA_UNIT_TESTING_F
 Use the **dev stack** instead of `docker compose up --build` after every change:
 
 ```bash
-./dev.sh
+./restart.sh   # stop, rebuild, and start in the background (recommended after git pull)
+# or: ./dev.sh
 # or: docker compose -f docker-compose.dev.yml up --build
 ```
+
+**First time after clone/pull:** `restart.sh` creates `.env` from `.env.example` automatically if it is missing. You only need to edit `.env` when changing paths or secrets.
 
 Open **http://localhost:5173** (not 3000).
 
@@ -269,6 +272,7 @@ OAuth 3LO apps require a site admin to authorize the app on many company Jira si
 
 | Issue | Fix |
 |-------|-----|
+| `./restart.sh` fails after git pull | Ensure Docker is running and your user can run `docker` (or use `sudo ./restart.sh`). If `.env` was missing, `restart.sh` creates it from `.env.example` on first run |
 | Invalid credentials on connect | Check site URL, email, and API token; token must belong to the same email |
 | Bitbucket 401 during delivery | Reconnect Bitbucket in Settings using your Atlassian email and a Bitbucket API token (app passwords no longer work for repository APIs) |
 | 401 on dashboard | Session expired — connect again |
