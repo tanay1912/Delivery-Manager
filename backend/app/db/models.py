@@ -30,8 +30,6 @@ class UserCredentials(Base):
     bitbucket_username: Mapped[str | None] = mapped_column(String(128), nullable=True)
     bitbucket_app_password_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     bitbucket_display_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    bitbucket_git_username: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    bitbucket_git_password_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     openai_api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     openai_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     cursor_api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)

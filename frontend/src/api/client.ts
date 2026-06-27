@@ -11,8 +11,6 @@ export interface MeResponse {
   site_url: string;
   bitbucket_configured?: boolean;
   bitbucket_username?: string | null;
-  bitbucket_git_username?: string | null;
-  bitbucket_git_configured?: boolean;
   openai_configured?: boolean;
   openai_model?: string | null;
   cursor_configured?: boolean;
@@ -33,15 +31,11 @@ export interface BitbucketStatus {
   configured: boolean;
   username?: string | null;
   display_name?: string | null;
-  git_username?: string | null;
-  git_configured?: boolean;
 }
 
 export interface BitbucketConnectRequest {
   username: string;
   app_password: string;
-  git_username?: string;
-  git_password?: string;
 }
 
 export interface OpenAIStatus {
@@ -67,7 +61,6 @@ export interface CursorConnectRequest {
 export interface CredentialSecretResponse {
   api_key?: string;
   api_token?: string;
-  git_password?: string;
 }
 
 export interface ConnectRequest {
@@ -448,7 +441,6 @@ export const api = {
   disconnectBitbucket: () =>
     request<{ ok: boolean; configured: boolean }>("/api/auth/bitbucket", { method: "DELETE" }),
   revealBitbucketSecret: () => request<CredentialSecretResponse>("/api/auth/bitbucket/secret"),
-  revealBitbucketGitSecret: () => request<CredentialSecretResponse>("/api/auth/bitbucket/git-secret"),
   getOpenAIStatus: () => request<OpenAIStatus>("/api/auth/openai"),
   connectOpenAI: (body: OpenAIConnectRequest) =>
     request<OpenAIStatus & { ok: boolean }>("/api/auth/openai", {

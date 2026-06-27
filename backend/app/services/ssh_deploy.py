@@ -84,7 +84,7 @@ async def run_environment_deploy(
         if not bitbucket_username or not bitbucket_app_password:
             raise DeployError(
                 "Deployment includes git commands that require Bitbucket authentication. "
-                "Add Bitbucket git username and password in Settings."
+                "Add your Atlassian account email and Bitbucket API token in Settings."
             )
         execution_commands = [
             apply_bitbucket_auth_to_command(command, bitbucket_username, bitbucket_app_password)

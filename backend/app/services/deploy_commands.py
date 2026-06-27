@@ -93,8 +93,7 @@ def format_deploy_command_failure(command: str, detail: str) -> str:
                 "Bitbucket app passwords no longer work for git pull. "
                 "In Settings → Bitbucket, connect with your Atlassian account email and a "
                 "Bitbucket API token (create one at id.atlassian.com, select Bitbucket, "
-                "enable repository read/write scopes). Clear any separate Git credentials "
-                "that still use an app password, then retry deployment."
+                "enable repository read/write scopes), then retry deployment."
             )
         return (
             f"Git authentication failed while running `{display_command}`. "

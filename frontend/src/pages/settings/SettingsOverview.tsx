@@ -67,7 +67,6 @@ export default function SettingsOverview() {
     loading,
     jiraConnected,
     bitbucketConfigured,
-    bitbucketGitConfigured,
     openaiConfigured,
     cursorConfigured,
     mappingsCount,
@@ -77,10 +76,10 @@ export default function SettingsOverview() {
 
   const aiConfigured = openaiConfigured || cursorConfigured;
   const setupComplete =
-    jiraConnected && bitbucketConfigured && bitbucketGitConfigured && aiConfigured && mappingsCount > 0;
+    jiraConnected && bitbucketConfigured && aiConfigured && mappingsCount > 0;
   const completedSteps = [
     jiraConnected,
-    bitbucketConfigured && bitbucketGitConfigured,
+    bitbucketConfigured,
     aiConfigured,
     mappingsCount > 0,
   ].filter(Boolean).length;
@@ -162,15 +161,9 @@ export default function SettingsOverview() {
           step={2}
           to="/settings/bitbucket"
           title="Bitbucket credentials"
-          description="API access for pull requests and branches, plus Git credentials for server deployments."
-          configured={bitbucketConfigured && bitbucketGitConfigured}
-          detail={
-            bitbucketConfigured
-              ? bitbucketGitConfigured
-                ? "API and Git credentials saved"
-                : "Git credentials still needed for deployment"
-              : undefined
-          }
+          description="API access for pull requests, branches, and git commands during deployment."
+          configured={bitbucketConfigured}
+          detail={bitbucketConfigured ? "API token saved" : undefined}
         />
         <SetupCard
           step={3}

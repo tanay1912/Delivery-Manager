@@ -10,8 +10,6 @@ class ConnectRequest(BaseModel):
 class BitbucketConnectRequest(BaseModel):
     username: str = Field(..., min_length=1, max_length=128)
     app_password: str = Field(default="", max_length=512)
-    git_username: str = Field(default="", max_length=128)
-    git_password: str = Field(default="", max_length=512)
 
 
 class OpenAIConnectRequest(BaseModel):

@@ -20,7 +20,7 @@ const PAGE_TITLES: Record<string, { title: string; subtitle: string }> = {
   },
   "/settings/bitbucket": {
     title: "Bitbucket",
-    subtitle: "API and Git credentials for repositories and deployments.",
+    subtitle: "API access for repositories and deployments.",
   },
   "/settings/ai": {
     title: "AI provider",

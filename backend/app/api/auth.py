@@ -17,12 +17,8 @@ from app.auth.ai_credentials import (
 from app.auth.bitbucket_credentials import (
     bitbucket_app_password,
     bitbucket_configured,
-    bitbucket_git_configured,
-    bitbucket_git_password,
-    reject_bitbucket_app_password_for_git,
     verify_bitbucket_credentials,
 )
-from app.auth.crypto import encrypt_token
 from app.auth.jira_credentials import normalize_site_url, ensure_jira_api_mode, verify_jira_credentials
 from app.auth.session import (
     REMEMBER_COOKIE,
@@ -84,23 +80,7 @@ def _bitbucket_status_payload(session: dict) -> dict:
         "configured": bitbucket_configured(session),
         "username": session.get("bitbucket_username"),
         "display_name": session.get("bitbucket_display_name"),
-        "git_username": session.get("bitbucket_git_username"),
-        "git_configured": bitbucket_git_configured(session),
     }
-
-
-def _apply_bitbucket_git_credentials(session: dict, git_username: str, git_password: str) -> None:
-    git_username = git_username.strip()
-    git_password = git_password.strip()
-
-    if not git_username:
-        session.pop("bitbucket_git_username", None)
-        session.pop("bitbucket_git_password_encrypted", None)
-        return
-
-    session["bitbucket_git_username"] = git_username
-    if git_password:
-        session["bitbucket_git_password_encrypted"] = encrypt_token(git_password)
 
 
 def _me_payload(session: dict) -> dict:
@@ -110,8 +90,6 @@ def _me_payload(session: dict) -> dict:
         "site_url": session.get("site_url"),
         "bitbucket_configured": bitbucket_configured(session),
         "bitbucket_username": session.get("bitbucket_username"),
-        "bitbucket_git_username": session.get("bitbucket_git_username"),
-        "bitbucket_git_configured": bitbucket_git_configured(session),
         "openai_configured": openai_configured(session),
         "openai_model": openai_model(session) if openai_configured(session) else None,
         "cursor_configured": cursor_configured(session),
@@ -236,14 +214,6 @@ async def connect_bitbucket(body: BitbucketConnectRequest, request: Request):
 
     email = body.username.strip()
     api_token = body.app_password.strip()
-    git_username = body.git_username.strip()
-    git_password = body.git_password.strip()
-
-    if git_password:
-        try:
-            reject_bitbucket_app_password_for_git(git_password)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
 
     if not api_token and bitbucket_configured(session):
         if "@" not in email:
@@ -252,7 +222,6 @@ async def connect_bitbucket(body: BitbucketConnectRequest, request: Request):
                 detail="Use your Atlassian account email (not your Bitbucket username).",
             )
         session["bitbucket_username"] = email
-        _apply_bitbucket_git_credentials(session, git_username, git_password)
         await update_session(session_id, session)
         await save_user_credentials(session)
         return {
@@ -281,7 +250,6 @@ async def connect_bitbucket(body: BitbucketConnectRequest, request: Request):
         raise HTTPException(status_code=502, detail="Could not reach Bitbucket.")
 
     session.update(bitbucket_data)
-    _apply_bitbucket_git_credentials(session, git_username, git_password)
     await update_session(session_id, session)
     await save_user_credentials(session)
 
@@ -299,14 +267,6 @@ async def reveal_bitbucket_secret(request: Request):
     return {"api_token": bitbucket_app_password(session)}
 
 
-@router.get("/bitbucket/git-secret")
-async def reveal_bitbucket_git_secret(request: Request):
-    session, _ = await _require_session(request)
-    if not bitbucket_git_configured(session):
-        raise HTTPException(status_code=404, detail="Bitbucket git credentials are not configured")
-    return {"git_password": bitbucket_git_password(session)}
-
-
 @router.delete("/bitbucket")
 async def disconnect_bitbucket(request: Request):
     session = await get_session_from_request(request)
@@ -320,8 +280,6 @@ async def disconnect_bitbucket(request: Request):
     session.pop("bitbucket_username", None)
     session.pop("bitbucket_app_password_encrypted", None)
     session.pop("bitbucket_display_name", None)
-    session.pop("bitbucket_git_username", None)
-    session.pop("bitbucket_git_password_encrypted", None)
     await update_session(session_id, session)
     await save_user_credentials(session)
 

@@ -24,11 +24,6 @@ export interface SettingsContextValue {
   setBitbucketUsername: (v: string) => void;
   bitbucketPassword: string;
   setBitbucketPassword: (v: string) => void;
-  bitbucketGitUsername: string;
-  setBitbucketGitUsername: (v: string) => void;
-  bitbucketGitPassword: string;
-  setBitbucketGitPassword: (v: string) => void;
-  bitbucketGitConfigured: boolean;
   bitbucketSaving: boolean;
   bitbucketDisconnecting: boolean;
   openaiConfigured: boolean;
@@ -62,7 +57,6 @@ export interface SettingsContextValue {
   revealOpenAIKey: () => Promise<void>;
   revealCursorKey: () => Promise<void>;
   revealBitbucketToken: () => Promise<void>;
-  revealBitbucketGitPassword: () => Promise<void>;
   refreshOpenAIModels: (apiKey?: string) => Promise<void>;
   refreshCursorModels: (apiKey?: string) => Promise<void>;
   disconnectBitbucket: () => Promise<void>;
@@ -91,9 +85,6 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   const [bitbucketConfigured, setBitbucketConfigured] = useState(false);
   const [bitbucketUsername, setBitbucketUsername] = useState("");
   const [bitbucketPassword, setBitbucketPassword] = useState("");
-  const [bitbucketGitUsername, setBitbucketGitUsername] = useState("");
-  const [bitbucketGitPassword, setBitbucketGitPassword] = useState("");
-  const [bitbucketGitConfigured, setBitbucketGitConfigured] = useState(false);
   const [bitbucketSaving, setBitbucketSaving] = useState(false);
   const [bitbucketDisconnecting, setBitbucketDisconnecting] = useState(false);
 
@@ -141,8 +132,6 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     setSiteName(me.site_name);
     setSiteUrl(me.site_url);
     setBitbucketConfigured(!!me.bitbucket_configured);
-    setBitbucketGitConfigured(!!me.bitbucket_git_configured);
-    setBitbucketGitUsername(me.bitbucket_git_username || "");
     setMappingsCount(mappingsData.mappings.length);
     if (me.bitbucket_username?.includes("@")) {
       setBitbucketUsername(me.bitbucket_username);
@@ -219,15 +208,10 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       const result = await api.connectBitbucket({
         username: bitbucketUsername,
         app_password: bitbucketPassword,
-        git_username: bitbucketGitUsername,
-        git_password: bitbucketGitPassword,
       });
       setBitbucketConfigured(true);
-      setBitbucketGitConfigured(!!result.git_configured);
       if (result.username) setBitbucketUsername(result.username);
-      setBitbucketGitUsername(result.git_username ?? "");
       setBitbucketPassword("");
-      setBitbucketGitPassword("");
       toast("Bitbucket credentials saved.", "success");
     } catch (err) {
       handleAuthError(err);
@@ -310,16 +294,6 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     }
   }, [handleAuthError]);
 
-  const revealBitbucketGitPassword = useCallback(async () => {
-    try {
-      const data = await api.revealBitbucketGitSecret();
-      if (data.git_password) setBitbucketGitPassword(data.git_password);
-    } catch (err) {
-      handleAuthError(err);
-      throw err;
-    }
-  }, [handleAuthError]);
-
   const handleJiraDisconnect = async () => {
     if (!confirm("Disconnect from Jira? You will be signed out.")) return;
     await handleLogout();
@@ -331,10 +305,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     try {
       await api.disconnectBitbucket();
       setBitbucketConfigured(false);
-      setBitbucketGitConfigured(false);
       setBitbucketPassword("");
-      setBitbucketGitUsername("");
-      setBitbucketGitPassword("");
       toast("Bitbucket credentials removed.", "success");
     } catch (err) {
       handleAuthError(err);
@@ -386,11 +357,6 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     setBitbucketUsername,
     bitbucketPassword,
     setBitbucketPassword,
-    bitbucketGitUsername,
-    setBitbucketGitUsername,
-    bitbucketGitPassword,
-    setBitbucketGitPassword,
-    bitbucketGitConfigured,
     bitbucketSaving,
     bitbucketDisconnecting,
     openaiConfigured,
@@ -424,7 +390,6 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     revealOpenAIKey,
     revealCursorKey,
     revealBitbucketToken,
-    revealBitbucketGitPassword,
     refreshOpenAIModels,
     refreshCursorModels,
     disconnectBitbucket,

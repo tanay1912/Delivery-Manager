@@ -54,12 +54,11 @@ Sign in with your Jira Cloud site URL, Atlassian account email, and API token. T
 
 ### 2. Bitbucket credentials (`/settings/bitbucket`)
 
-Two credential sets are required for the full pipeline:
+Connect your Atlassian account email and a Bitbucket API token:
 
 | Credential | Purpose |
 |------------|---------|
-| **API token** (Atlassian email + Bitbucket API token) | Create branches, open/merge pull requests via the Bitbucket REST API |
-| **Git credentials** (username + app password or token) | Clone/push on the deployment server over SSH |
+| **API token** (Atlassian email + Bitbucket API token) | Create branches, open/merge pull requests via the Bitbucket REST API, and authenticate git pull during deployment |
 
 Create a Bitbucket API token at [id.atlassian.com](https://id.atlassian.com/manage-profile/security/api-tokens) with repository read and write scopes. Use your **Atlassian account email** — app passwords no longer work for repository APIs.
 

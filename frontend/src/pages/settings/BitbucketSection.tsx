@@ -18,16 +18,10 @@ export default function BitbucketSection() {
     setBitbucketUsername,
     bitbucketPassword,
     setBitbucketPassword,
-    bitbucketGitUsername,
-    setBitbucketGitUsername,
-    bitbucketGitPassword,
-    setBitbucketGitPassword,
-    bitbucketGitConfigured,
     bitbucketSaving,
     bitbucketDisconnecting,
     handleBitbucketSubmit,
     revealBitbucketToken,
-    revealBitbucketGitPassword,
     disconnectBitbucket,
   } = useSettings();
 
@@ -36,7 +30,7 @@ export default function BitbucketSection() {
       <CardHeader
         configured={bitbucketConfigured}
         title="Bitbucket"
-        description="API access for PRs and branches, plus Git credentials for deployment commands."
+        description="API access for pull requests, branches, and git commands during deployment."
         icon={
           <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M17 8l4 4m0 0l-4 4m4-4H3" />
@@ -50,7 +44,7 @@ export default function BitbucketSection() {
           <div>
             <h3 className="text-sm font-semibold text-gray-800">API access</h3>
             <p className="text-xs text-gray-500 mt-0.5">
-              Used for pull requests, branches, and repository API calls.
+              Used for pull requests, branches, repository API calls, and git pull during deployment.
             </p>
           </div>
           <p className="text-sm text-gray-600">
@@ -93,48 +87,6 @@ export default function BitbucketSection() {
             {bitbucketConfigured && !bitbucketPassword && (
               <p className="text-xs text-gray-500">Click the eye icon to view the saved token.</p>
             )}
-          </div>
-
-          <div className="border-t border-gray-100 pt-4 space-y-3">
-            <div>
-              <h3 className="text-sm font-semibold text-gray-800">Git credentials for deployment</h3>
-              <p className="text-xs text-gray-500 mt-0.5">
-                Optional. Leave blank to reuse the API token above for <code className="text-xs">git pull</code>{" "}
-                during deployment. If you fill these in, use username{" "}
-                <code className="text-xs">x-bitbucket-api-token-auth</code> and your Bitbucket API token — app
-                passwords no longer work.
-              </p>
-            </div>
-            <label className="block space-y-1">
-              <span className="text-sm text-gray-700">Bitbucket username</span>
-              <input
-                type="text"
-                required={!bitbucketGitConfigured}
-                autoComplete="off"
-                placeholder="your-bitbucket-username"
-                value={bitbucketGitUsername}
-                onChange={(e) => setBitbucketGitUsername(e.target.value)}
-                className={INPUT_CLASS}
-              />
-            </label>
-            <div className="space-y-1">
-              <label htmlFor="bitbucket-git-password" className="block text-sm text-gray-700">
-                Git password
-              </label>
-              <PasswordInput
-                id="bitbucket-git-password"
-                required={!bitbucketGitConfigured}
-                autoComplete="new-password"
-                placeholder={bitbucketGitConfigured ? SAVED_SECRET_PLACEHOLDER : "Bitbucket API token"}
-                value={bitbucketGitPassword}
-                onChange={(e) => setBitbucketGitPassword(e.target.value)}
-                onReveal={bitbucketGitConfigured ? revealBitbucketGitPassword : undefined}
-                className={INPUT_CLASS}
-              />
-              {bitbucketGitConfigured && !bitbucketGitPassword && (
-                <p className="text-xs text-gray-500">Click the eye icon to view the saved password.</p>
-              )}
-            </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 pt-1">
             <button type="submit" disabled={bitbucketSaving} className={BTN_PRIMARY}>
