@@ -83,7 +83,7 @@ function DeliverArrow() {
 }
 
 const ACTION_BTN_BASE =
-  "inline-flex items-center justify-center gap-1.5 rounded-lg px-3.5 py-1.5 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none";
+  "inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-3.5 py-1.5 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none";
 
 function deliverAction(status?: string): { label: string; showArrow: boolean; className: string } {
   const s = (status || "").toLowerCase().trim();
@@ -170,7 +170,7 @@ export default function IssueTable({
               <th className="table-header hidden lg:table-cell">Priority</th>
               <th className="table-header hidden lg:table-cell">Assignee</th>
               <th className="table-header hidden sm:table-cell">Updated</th>
-              {onDeliver && <th className="table-header text-right w-[140px]">Action</th>}
+              {onDeliver && <th className="table-header text-right w-[170px]">Action</th>}
             </tr>
           </thead>
           <tbody>
@@ -241,7 +241,7 @@ export default function IssueTable({
                   {formatRelativeTime(issue.updated)}
                 </td>
                 {onDeliver && action && (
-                  <td className="px-5 h-[52px] text-right border-b border-slate-100 w-[140px]">
+                  <td className="px-5 h-[52px] text-right border-b border-slate-100 w-[170px]">
                     <button
                       onClick={() => onDeliver(issue)}
                       className={action.className}

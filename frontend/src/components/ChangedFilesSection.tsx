@@ -17,6 +17,8 @@ interface ChangedFilesSectionProps {
   selectedPath: string | null;
   onSelect: (file: ChangedFile | null) => void;
   defaultExpanded?: boolean;
+  /** Changes when the file list is refreshed — forces list remount. */
+  listKey?: string | null;
 }
 
 export default function ChangedFilesSection({
@@ -24,6 +26,7 @@ export default function ChangedFilesSection({
   selectedPath,
   onSelect,
   defaultExpanded = false,
+  listKey,
 }: ChangedFilesSectionProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
 
@@ -41,7 +44,10 @@ export default function ChangedFilesSection({
         <span className="text-xs font-normal text-slate-500">{expanded ? "Hide" : "Show"}</span>
       </button>
       {expanded && (
-        <ul className="mt-3 rounded-lg border border-slate-200/80 bg-white divide-y divide-slate-100 overflow-hidden max-h-72 overflow-y-auto">
+        <ul
+          key={listKey ?? String(files.length)}
+          className="mt-3 rounded-lg border border-slate-200/80 bg-white divide-y divide-slate-100 overflow-hidden max-h-72 overflow-y-auto"
+        >
           {files.map((file) => {
             const isSelected = selectedPath === file.path;
             return (

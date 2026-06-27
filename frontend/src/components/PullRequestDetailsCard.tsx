@@ -91,7 +91,7 @@ function PrCard({
       <div className="p-4 flex-1">
         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-3">{title}</p>
         {prUrl ? (
-          <div className="space-y-2">
+          <div className="space-y-4">
             <a
               href={prUrl}
               target="_blank"

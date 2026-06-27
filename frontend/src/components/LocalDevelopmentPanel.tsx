@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { DeliveryRun } from "../api/client";
 import { getRevisionHistoryEntries } from "../utils/deliverySteps";
 import ChangedFilesSection from "./ChangedFilesSection";
@@ -13,6 +13,10 @@ interface LocalDevelopmentPanelProps {
   onApplyRevision: () => void;
   disabled?: boolean;
   onCreatePrs: () => void;
+  /** When PRs already exist or were merged — adjust confirm button copy. */
+  postPrUpdate?: boolean;
+  /** PR creation substeps shown below the Create Pull Request button. */
+  prSteps?: ReactNode;
 }
 
 function latestStepEntry(stepsLog: DeliveryRun["steps_log"], stepId: string) {
@@ -34,13 +38,24 @@ export default function LocalDevelopmentPanel({
   onApplyRevision,
   disabled = false,
   onCreatePrs,
+  postPrUpdate = false,
+  prSteps,
 }: LocalDevelopmentPanelProps) {
   const [selectedFile, setSelectedFile] = useState<{ path: string; action: string } | null>(null);
   const hasChangedFiles = run.changed_files.length > 0;
   const revisionHistory = getRevisionHistoryEntries(run.steps_log);
   const actionDisabled = disabled || creatingPrs || applyingRevision;
   const prsCreated = stepCompleted(run.steps_log, "confirm_local_changes");
-  const showCreatePrs = hasChangedFiles && !prsCreated;
+  const commitDone = stepCompleted(run.steps_log, "commit_changes");
+  const hasPendingChanges = hasChangedFiles && (!prsCreated || !commitDone);
+  const showCreatePrs = hasPendingChanges;
+  const confirmLabel = postPrUpdate
+    ? creatingPrs
+      ? "Pushing changes…"
+      : "Push changes & update pull requests"
+    : creatingPrs
+      ? "Creating pull request…"
+      : "Create Pull Request";
 
   return (
     <section className="card mb-6 overflow-hidden border-2 border-brand-400 shadow-brand-md">
@@ -50,11 +65,23 @@ export default function LocalDevelopmentPanel({
         </span>
         <h2 className="text-lg font-bold text-brand-600 mt-2">Review generated changes</h2>
         <p className="text-sm text-slate-600 mt-1">
-          Review the generated code on branch{" "}
-          <code className="rounded bg-slate-100 px-1.5 py-0.5 text-xs font-mono text-slate-800">
-            {run.branch_name || "feature branch"}
-          </code>
-          , then create pull requests when ready.
+          {postPrUpdate ? (
+            <>
+              Update code on branch{" "}
+              <code className="rounded bg-slate-100 px-1.5 py-0.5 text-xs font-mono text-slate-800">
+                {run.branch_name || "feature branch"}
+              </code>
+              , then push to refresh open pull requests or open new ones if already merged.
+            </>
+          ) : (
+            <>
+              Review the generated code on branch{" "}
+              <code className="rounded bg-slate-100 px-1.5 py-0.5 text-xs font-mono text-slate-800">
+                {run.branch_name || "feature branch"}
+              </code>
+              , then create pull requests when ready.
+            </>
+          )}
         </p>
       </div>
 
@@ -65,6 +92,7 @@ export default function LocalDevelopmentPanel({
               files={run.changed_files}
               selectedPath={selectedFile?.path ?? null}
               defaultExpanded
+              listKey={run.changed_files_refreshed_at ?? run.updated_at}
               onSelect={(file) =>
                 setSelectedFile(file ? { path: file.path, action: file.action } : null)
               }
@@ -159,23 +187,29 @@ export default function LocalDevelopmentPanel({
           </div>
         )}
 
-        {showCreatePrs && (
-          <div className="flex flex-wrap gap-3 pt-1">
-            <button
-              type="button"
-              onClick={onCreatePrs}
-              disabled={actionDisabled}
-              className="min-w-48 rounded-lg bg-emerald-600 px-6 py-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50 transition-colors"
-            >
-              {creatingPrs ? "Creating pull request…" : "Create Pull Request"}
-            </button>
+        {(showCreatePrs || creatingPrs) && (
+          <div className="space-y-3 pt-1">
+            {showCreatePrs && (
+              <div className="flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  onClick={onCreatePrs}
+                  disabled={actionDisabled}
+                  className="min-w-48 rounded-lg bg-emerald-600 px-6 py-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50 transition-colors"
+                >
+                  {confirmLabel}
+                </button>
+              </div>
+            )}
+            {prSteps}
+            {showCreatePrs && (
+              <p className="text-xs text-slate-500">
+                {postPrUpdate
+                  ? "Commits changes to the feature branch. Open pull requests are updated automatically; new ones are created when the previous PR was merged."
+                  : "Commits the generated changes to the feature branch and opens pull requests to Staging and Live."}
+              </p>
+            )}
           </div>
-        )}
-        {showCreatePrs && (
-          <p className="text-xs text-slate-500">
-            Commits the generated changes to the feature branch and opens pull requests to Staging and
-            Live.
-          </p>
         )}
         {run.error_message && (
           <p className="text-sm text-red-700">{run.error_message}</p>

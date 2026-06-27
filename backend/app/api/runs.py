@@ -23,6 +23,7 @@ from app.schemas.runs import (
     RetryDeploymentRequest,
     RunListResponse,
     StartRunRequest,
+    StartVerificationRequest,
     run_to_response,
 )
 from app.services.deploy_commands import fetch_all_deploy_commands_from_db
@@ -38,10 +39,13 @@ from app.services.delivery_pipeline import (
     ensure_in_estimation_status,
     get_run_file_diff,
     has_pending_post_merge_work,
+    is_estimation_step,
     merge_pr_target,
     post_estimation,
     post_website_verification,
     prepare_estimation,
+    prepare_question,
+    reload_comment,
     request_info,
     reset_run_to_estimation,
     reload_jira_issue,
@@ -49,6 +53,7 @@ from app.services.delivery_pipeline import (
     resume_post_merge_workflow_if_needed,
     retry_deployment,
     start_implementation,
+    start_website_verification,
     sync_pr_review_state,
     sync_jira_workflow_state,
     verification_screenshot_file,
@@ -224,12 +229,14 @@ async def start_run(
         return await _run_response(run, session, db)
 
     phase = get_workflow_phase(run)
-    if phase in ("estimation", ""):
+    if is_estimation_step(run):
         status_name = snapshot["status_name"]
         try:
             new_status = await ensure_in_estimation_status(jira, issue_key, status_name)
             ctx = dict(run.context_data or {})
             ctx["status_name"] = new_status
+            if phase == "waiting_for_info":
+                ctx["workflow_phase"] = "estimation"
             run.context_data = ctx
             await db.commit()
             await db.refresh(run)
@@ -298,6 +305,46 @@ async def prepare_estimation_endpoint(
 
     try:
         run = await prepare_estimation(db, run, session)
+    except PipelineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await _run_response(run, session, db)
+
+
+@router.post("/{run_id}/prepare-question", response_model=DeliveryRunResponse)
+async def prepare_question_endpoint(
+    run_id: uuid.UUID,
+    session: dict = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    run = await db.get(DeliveryRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.status == "running":
+        raise HTTPException(status_code=409, detail="A step is already running")
+
+    try:
+        run = await prepare_question(db, run, session)
+    except PipelineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await _run_response(run, session, db)
+
+
+@router.post("/{run_id}/reload-comment", response_model=DeliveryRunResponse)
+async def reload_comment_endpoint(
+    run_id: uuid.UUID,
+    session: dict = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    run = await db.get(DeliveryRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.status == "running":
+        raise HTTPException(status_code=409, detail="A step is already running")
+
+    try:
+        run = await reload_comment(db, run, session)
     except PipelineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -585,6 +632,30 @@ async def post_run_verification(
     return await _run_response(run, session, db)
 
 
+@router.post("/{run_id}/start-verification", response_model=DeliveryRunResponse)
+async def start_run_verification(
+    run_id: uuid.UUID,
+    body: StartVerificationRequest | None = None,
+    session: dict = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    run = await db.get(DeliveryRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    try:
+        run = await start_website_verification(
+            db,
+            run,
+            session,
+            body.target if body else None,
+        )
+    except PipelineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await _run_response(run, session, db)
+
+
 @router.get("/{run_id}/verification-screenshot")
 async def get_verification_screenshot(
     run_id: uuid.UUID,
@@ -656,7 +727,7 @@ async def apply_revision_endpoint(
 
     try:
         phase = get_workflow_phase(run)
-        if phase == "local_development":
+        if body.preview or phase == "local_development":
             run = await apply_local_code_revision(db, run, session, body.prompt)
         else:
             run = await apply_code_revision(db, run, session, body.prompt)

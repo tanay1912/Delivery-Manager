@@ -1,3 +1,5 @@
+import re
+
 import httpx
 
 
@@ -247,28 +249,113 @@ class JiraClient:
         return JiraClient._adf_from_text(text)
 
     @staticmethod
-    def _adf_from_text(text: str) -> dict:
-        paragraphs = []
-        for block in text.split("\n\n"):
-            block = block.strip()
-            if not block:
-                continue
-            lines = block.split("\n")
-            content: list[dict] = []
-            for i, line in enumerate(lines):
-                if line:
-                    content.append({"type": "text", "text": line})
-                if i < len(lines) - 1:
-                    content.append({"type": "hardBreak"})
-            paragraphs.append(
+    def format_text_for_jira(text: str) -> str:
+        """Normalize plain text so numbered and bulleted lists render on separate lines."""
+        if not text or not text.strip():
+            return text
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = re.sub(r"(?<=\S)\s+(\d+)\.\s", r"\n\1. ", normalized)
+        normalized = re.sub(r"(?<=\S)\s+([-*])\s", r"\n\1 ", normalized)
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        return normalized.strip()
+
+    @staticmethod
+    def _adf_list_item(text: str) -> dict:
+        return {
+            "type": "listItem",
+            "content": [
                 {
                     "type": "paragraph",
-                    "content": content or [{"type": "text", "text": ""}],
+                    "content": [{"type": "text", "text": text}],
                 }
-            )
-        if not paragraphs:
-            paragraphs = [{"type": "paragraph", "content": [{"type": "text", "text": text}]}]
-        return {"type": "doc", "version": 1, "content": paragraphs}
+            ],
+        }
+
+    @staticmethod
+    def _adf_paragraph_block(lines: list[str]) -> dict:
+        content: list[dict] = []
+        for i, line in enumerate(lines):
+            if line:
+                content.append({"type": "text", "text": line})
+            if i < len(lines) - 1:
+                content.append({"type": "hardBreak"})
+        return {
+            "type": "paragraph",
+            "content": content or [{"type": "text", "text": ""}],
+        }
+
+    @staticmethod
+    def _adf_from_text(text: str) -> dict:
+        text = JiraClient.format_text_for_jira(text)
+        if not text:
+            return {
+                "type": "doc",
+                "version": 1,
+                "content": [{"type": "paragraph", "content": [{"type": "text", "text": ""}]}],
+            }
+
+        content: list[dict] = []
+        lines = text.split("\n")
+        index = 0
+        numbered_pattern = re.compile(r"^\d+\.\s*(.*)$")
+        bullet_pattern = re.compile(r"^[-*]\s+(.*)$")
+
+        while index < len(lines):
+            stripped = lines[index].strip()
+            if not stripped:
+                index += 1
+                continue
+
+            numbered_match = numbered_pattern.match(stripped)
+            if numbered_match:
+                items: list[dict] = []
+                while index < len(lines):
+                    current = lines[index].strip()
+                    if not current:
+                        index += 1
+                        break
+                    item_match = numbered_pattern.match(current)
+                    if not item_match:
+                        break
+                    items.append(JiraClient._adf_list_item(item_match.group(1).strip()))
+                    index += 1
+                if items:
+                    content.append({"type": "orderedList", "content": items})
+                continue
+
+            bullet_match = bullet_pattern.match(stripped)
+            if bullet_match:
+                items = []
+                while index < len(lines):
+                    current = lines[index].strip()
+                    if not current:
+                        index += 1
+                        break
+                    item_match = bullet_pattern.match(current)
+                    if not item_match:
+                        break
+                    items.append(JiraClient._adf_list_item(item_match.group(1).strip()))
+                    index += 1
+                if items:
+                    content.append({"type": "bulletList", "content": items})
+                continue
+
+            paragraph_lines = [lines[index]]
+            index += 1
+            while index < len(lines):
+                current = lines[index].strip()
+                if not current:
+                    index += 1
+                    break
+                if numbered_pattern.match(current) or bullet_pattern.match(current):
+                    break
+                paragraph_lines.append(lines[index])
+                index += 1
+            content.append(JiraClient._adf_paragraph_block(paragraph_lines))
+
+        if not content:
+            content = [{"type": "paragraph", "content": [{"type": "text", "text": text}]}]
+        return {"type": "doc", "version": 1, "content": content}
 
     async def get_fields(self) -> list[dict]:
         async with httpx.AsyncClient() as client:
@@ -466,20 +553,32 @@ class JiraClient:
         return text
 
     @staticmethod
+    def transition_destination_name(transition: dict) -> str:
+        return str((transition.get("to") or {}).get("name") or "").strip()
+
+    @staticmethod
+    def transition_result_name(transition: dict) -> str:
+        dest = JiraClient.transition_destination_name(transition)
+        if dest:
+            return dest
+        return str(transition.get("name") or "").strip()
+
+    @staticmethod
     def find_transition(
         transitions: list[dict],
         *keywords: str,
         exclude_keywords: tuple[str, ...] | None = None,
         exact_names: tuple[str, ...] | None = None,
     ) -> dict | None:
-        for exact in exact_names or ():
-            target = exact.lower().strip()
-            for transition in transitions:
-                if transition.get("name", "").lower().strip() == target:
-                    return transition
-
         lowered = [k.lower() for k in keywords]
         exclude = [k.lower() for k in (exclude_keywords or ())]
+
+        def labels(transition: dict) -> tuple[str, ...]:
+            dest = JiraClient.transition_destination_name(transition)
+            action = str(transition.get("name") or "").strip()
+            if dest:
+                return (dest, action)
+            return (action,) if action else ()
 
         def excluded(name: str) -> bool:
             name_l = name.lower().strip()
@@ -500,14 +599,32 @@ class JiraClient:
                 return False
             return any(keyword_matches(kw, name) for kw in lowered)
 
+        for exact in exact_names or ():
+            target = exact.lower().strip()
+            for transition in transitions:
+                for name in labels(transition):
+                    if name.lower().strip() == target:
+                        return transition
+
         for transition in transitions:
-            name = transition.get("name", "")
-            if all_match(name):
-                return transition
+            dest = JiraClient.transition_destination_name(transition)
+            if dest and excluded(dest):
+                continue
+            for name in labels(transition):
+                if all_match(name):
+                    return transition
+
         for transition in transitions:
-            name = transition.get("name", "")
-            if any_match(name):
-                return transition
+            dest = JiraClient.transition_destination_name(transition)
+            if dest:
+                if excluded(dest):
+                    continue
+                if any_match(dest):
+                    return transition
+            else:
+                action = str(transition.get("name") or "").strip()
+                if action and any_match(action):
+                    return transition
         return None
 
     async def count_issues(self, jql: str) -> int:

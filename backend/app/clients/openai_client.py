@@ -4,6 +4,7 @@ import re
 from openai import AsyncOpenAI
 
 from app.clients.cursor_client import _project_agent_context, _repo_stack_context
+from app.clients.jira_client import JiraClient
 
 
 def _code_generation_preamble(
@@ -45,18 +46,25 @@ class OpenAIClient:
     ) -> dict:
         comments_block = ""
         if jira_comments.strip():
-            comments_block = f"\n\nJira comments from users:\n{jira_comments.strip()}"
+            comments_block = f"\n\nJira comments and discussion:\n{jira_comments.strip()}"
+        else:
+            comments_block = "\n\nJira comments and discussion:\n(none)"
 
         prompt = f"""You are a senior software engineer estimating Jira work.
 
+Read ALL of the following before estimating — task heading, description, and every Jira comment:
 Issue: {issue_key}
-Summary: {summary}
+Task heading (summary): {summary}
 Description:
 {description or "(no description)"}{comments_block}
 
 Assess whether the ticket has enough detail to estimate and implement confidently.
-Consider both the description and any Jira comments from stakeholders.
+Use the task heading, description, and full comment thread together — comments may add scope or answer earlier questions.
 If requirements are vague, acceptance criteria are missing, or scope is unclear, set needs_clarification to true.
+
+Formatting rules (use literal newlines in JSON string values):
+- Put each numbered item on its own line: "1. First item\\n2. Second item\\n3. Third item"
+- Do not run multiple numbered points together on one line.
 
 Respond with JSON only:
 {{
@@ -64,9 +72,9 @@ Respond with JSON only:
   "hours": <number>,
   "reasoning": "<brief explanation of the estimate>",
   "needs_clarification": <boolean>,
-  "clarification_question": "<specific question to ask in Jira if needs_clarification is true, else empty string>",
-  "development_plan": "<concrete implementation plan: approach, components/files to change, ordered steps, and dependencies>",
-  "test_cases": "<numbered manual test cases covering happy path, edge cases, and regression checks>"
+  "clarification_question": "<numbered clarification questions for Jira when information is missing or ambiguous — one question per line (1. ...\\n2. ...); empty string only if the ticket is fully clear>",
+  "development_plan": "<concrete implementation plan as numbered steps — one step per line (1. ...\\n2. ...): approach, components/files to change, ordered steps, and dependencies>",
+  "test_cases": "<numbered manual test cases — one per line (1. ...\\n2. ...): happy path, edge cases, and regression checks>"
 }}"""
 
         response = await self.client.chat.completions.create(
@@ -78,15 +86,71 @@ Respond with JSON only:
         content = response.choices[0].message.content or "{}"
         data = json.loads(content)
         needs_clarification = bool(data.get("needs_clarification", False))
+        clarification = JiraClient.format_text_for_jira(str(data.get("clarification_question", "")))
+        if needs_clarification and not clarification.strip():
+            clarification = JiraClient.format_text_for_jira(
+                "1. Could you clarify the acceptance criteria and expected behaviour for this ticket?"
+            )
         return {
             "story_points": float(data.get("story_points", 3)),
             "hours": float(data.get("hours", 4)),
-            "reasoning": str(data.get("reasoning", "")),
+            "reasoning": JiraClient.format_text_for_jira(str(data.get("reasoning", ""))),
             "needs_clarification": needs_clarification,
-            "clarification_question": str(data.get("clarification_question", "")),
-            "development_plan": str(data.get("development_plan", "")).strip(),
-            "test_cases": str(data.get("test_cases", "")).strip(),
+            "clarification_question": clarification.strip(),
+            "development_plan": JiraClient.format_text_for_jira(str(data.get("development_plan", ""))),
+            "test_cases": JiraClient.format_text_for_jira(str(data.get("test_cases", ""))),
         }
+
+    async def generate_clarification_questions(
+        self,
+        issue_key: str,
+        summary: str,
+        description: str,
+        *,
+        jira_comments: str = "",
+    ) -> str:
+        comments_block = ""
+        if jira_comments.strip():
+            comments_block = f"\n\nJira comments and discussion:\n{jira_comments.strip()}"
+        else:
+            comments_block = "\n\nJira comments and discussion:\n(none)"
+
+        prompt = f"""You are a senior software engineer reviewing a Jira ticket before estimation.
+
+Read ALL of the following — task heading, description, and every Jira comment:
+Issue: {issue_key}
+Task heading (summary): {summary}
+Description:
+{description or "(no description)"}{comments_block}
+
+Draft numbered clarification questions to post in Jira before estimating this work.
+Focus on missing acceptance criteria, ambiguous scope, technical unknowns, dependencies, and edge cases.
+Ask specific, actionable questions — not generic placeholders.
+Include at least one question even if the ticket looks mostly clear (confirm assumptions or edge cases).
+
+Formatting rules (use literal newlines in JSON string values):
+- Put each numbered item on its own line: "1. First question\\n2. Second question\\n3. Third question"
+- Do not run multiple numbered points together on one line.
+
+Respond with JSON only:
+{{
+  "clarification_question": "<numbered clarification questions — one per line (1. ...\\n2. ...); at least one question>"
+}}"""
+
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            temperature=0.2,
+        )
+        content = response.choices[0].message.content or "{}"
+        data = json.loads(content)
+        clarification = JiraClient.format_text_for_jira(str(data.get("clarification_question", "")))
+        if not clarification.strip():
+            clarification = JiraClient.format_text_for_jira(
+                "1. Could you clarify the acceptance criteria and expected behaviour for this ticket?"
+            )
+        return clarification.strip()
 
     async def generate_code_changes(
         self,
@@ -294,6 +358,59 @@ Respond with JSON only:
             "impact_analysis": str(data.get("impact_analysis", "")).strip(),
         }
 
+    async def resolve_verification_url(
+        self,
+        *,
+        issue_key: str,
+        summary: str,
+        description: str,
+        changed_files: list,
+        base_website_url: str,
+    ) -> dict:
+        changed_paths = [
+            str(item["path"])
+            for item in changed_files
+            if isinstance(item, dict) and item.get("path")
+        ]
+        files_block = "\n".join(f"- {path}" for path in changed_paths) or "(none)"
+        prompt = f"""You are a QA engineer deciding which website page to screenshot for Unit Testing verification.
+
+Issue: {issue_key}
+Summary: {summary}
+Ticket details:
+{description or "(no description)"}
+
+Changed files in this delivery:
+{files_block}
+
+Base website URL: {base_website_url}
+
+Choose the single most relevant page to screenshot based on the functionality that was developed.
+Examples: homepage, category page, product page, CMS page, checkout, cart, search results, account page, etc.
+Prefer a specific URL or path mentioned in the ticket when present.
+If the change is global (theme, header, footer, CSS) or the target page is unclear, use the homepage.
+
+Respond with JSON only:
+{{
+  "url": "<full absolute URL to screenshot, must stay on the same site as the base URL>",
+  "page_type": "<homepage|category|product|cms|checkout|cart|search|account|other>",
+  "reason": "<one sentence explaining why this page was chosen>"
+}}"""
+
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            temperature=0.2,
+        )
+        content = response.choices[0].message.content or "{}"
+        data = json.loads(content)
+        return {
+            "url": str(data.get("url", "")).strip(),
+            "page_type": str(data.get("page_type", "other")).strip().lower() or "other",
+            "reason": str(data.get("reason", "")).strip(),
+        }
+
     async def verify_website_screenshot(
         self,
         issue_key: str,
@@ -301,19 +418,28 @@ Respond with JSON only:
         environment: str,
         website_url: str,
         screenshot_png: bytes,
+        *,
+        page_type: str = "",
+        page_reason: str = "",
     ) -> dict:
         import base64
 
         image_b64 = base64.b64encode(screenshot_png).decode("ascii")
+        page_context = ""
+        if page_type or page_reason:
+            page_context = (
+                f"\nPage type: {page_type or 'unknown'}"
+                f"\nWhy this page: {page_reason or '(not specified)'}\n"
+            )
         prompt = f"""You are a QA engineer verifying a website change for a Jira ticket.
 
 Issue: {issue_key}
 Summary: {summary}
 Environment: {environment}
 URL: {website_url}
-
+{page_context}
 Review the screenshot and assess whether the site appears healthy and whether the described change
-is likely visible or complete. Note layout issues, errors, blank pages, or obvious regressions.
+is likely visible or complete on this page. Note layout issues, errors, blank pages, or obvious regressions.
 
 Respond with JSON only:
 {{

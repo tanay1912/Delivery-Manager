@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
 import { DeliveryRun, PendingWebsiteVerification, WebsiteVerification, api } from "../api/client";
+import {
+  inferNextVerificationTarget,
+  isVerifyStepRunning,
+  needsLivePrMergeStep,
+} from "../utils/deliverySteps";
 
 interface VerificationPanelProps {
   run: DeliveryRun;
@@ -7,6 +12,9 @@ interface VerificationPanelProps {
   retryDisabled: boolean;
   retryingDeployment: boolean;
   mergeInProgress: boolean;
+  startingVerification?: boolean;
+  onStartVerification?: () => void;
+  onMoveToPullRequest?: () => void;
   onPostVerification?: (comment: string) => void;
   postingVerification?: boolean;
 }
@@ -74,6 +82,11 @@ function VerificationScreenshot({
   );
 }
 
+function formatPageType(pageType?: string | null): string {
+  if (!pageType) return "";
+  return pageType.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
 function PendingVerificationReview({
   run,
   pending,
@@ -98,7 +111,15 @@ function PendingVerificationReview({
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h4 className="font-semibold text-slate-900">Verify {pending.environment} website</h4>
+          {pending.page_type && (
+            <p className="text-xs font-medium text-blue-700 mt-0.5">
+              Screenshot: {formatPageType(pending.page_type)} page
+            </p>
+          )}
           <p className="text-sm text-slate-600 break-all mt-0.5">{pending.url}</p>
+          {pending.page_reason && (
+            <p className="text-xs text-slate-500 mt-1">{pending.page_reason}</p>
+          )}
         </div>
         <span
           className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${
@@ -187,9 +208,11 @@ function CompletedVerificationItem({ item }: { item: WebsiteVerification }) {
 function statusIndicator({
   pendingVerification,
   verifyStepRunning,
+  readyToStart,
 }: {
   pendingVerification: boolean;
   verifyStepRunning: boolean;
+  readyToStart: boolean;
 }): { label: string; className: string } {
   if (verifyStepRunning) {
     return { label: "In progress", className: "bg-blue-100 text-blue-700" };
@@ -197,23 +220,39 @@ function statusIndicator({
   if (pendingVerification) {
     return { label: "Review verification", className: "bg-amber-100 text-amber-800" };
   }
+  if (readyToStart) {
+    return { label: "Ready to test", className: "bg-brand-100 text-brand-700" };
+  }
   return { label: "Awaiting verification", className: "bg-amber-100 text-amber-800" };
 }
 
 function actionDescription({
   pendingVerification,
   verifyingWebsite,
+  readyToStart,
+  nextTarget,
 }: {
   pendingVerification: boolean;
   verifyingWebsite: boolean;
+  readyToStart: boolean;
+  nextTarget: "beta" | "master" | null;
 }): string {
   if (verifyingWebsite) {
-    return "Browsing the staging website, capturing a screenshot, and drafting a Jira comment for Unit Testing…";
+    return "Choosing the relevant page from the ticket, capturing a screenshot, and drafting a Jira comment for Unit Testing…";
   }
   if (pendingVerification) {
     return "Review the website screenshot and Jira comment below. Edit if needed, then post to Jira to continue.";
   }
-  return "After deployment completes, the system verifies the website and prepares a Jira comment for your review.";
+  if (readyToStart) {
+    const envLabel = nextTarget === "master" ? "Live" : "Staging";
+    return `${envLabel} deployment finished. Start testing to capture a website screenshot and draft the Unit Testing comment.`;
+  }
+  return "After deployment completes, start testing to verify the website and prepare a Jira comment for your review.";
+}
+
+function verificationEnvironmentLabel(target: "beta" | "master" | null): string {
+  if (target === "master") return "Live";
+  return "Staging";
 }
 
 export default function VerificationPanel({
@@ -222,32 +261,38 @@ export default function VerificationPanel({
   retryDisabled,
   retryingDeployment,
   mergeInProgress,
+  startingVerification = false,
+  onStartVerification,
+  onMoveToPullRequest,
   onPostVerification,
   postingVerification = false,
 }: VerificationPanelProps) {
   const verifications = run.verifications ?? [];
   const pendingVerification = run.pending_verification;
-  const verifyStepRunning = (run.steps_log ?? []).some(
-    (entry) =>
-      (entry.step === "verify_beta" || entry.step === "verify_master") &&
-      entry.status === "running" &&
-      !pendingVerification,
-  );
+  const nextVerificationTarget = inferNextVerificationTarget(run);
+  const readyToStartTesting = Boolean(nextVerificationTarget && !pendingVerification && onStartVerification);
+  const verifyStepRunning = isVerifyStepRunning(run) || startingVerification;
+  const showLivePrMergePrompt = needsLivePrMergeStep(run) && !pendingVerification && !verifyStepRunning;
   const hasContent =
     isActive ||
     verifications.length > 0 ||
     Boolean(pendingVerification) ||
-    verifyStepRunning;
+    verifyStepRunning ||
+    readyToStartTesting ||
+    showLivePrMergePrompt;
 
   if (!hasContent) return null;
 
   const status = statusIndicator({
     pendingVerification: Boolean(pendingVerification),
     verifyStepRunning,
+    readyToStart: readyToStartTesting,
   });
   const description = actionDescription({
     pendingVerification: Boolean(pendingVerification),
     verifyingWebsite: verifyStepRunning,
+    readyToStart: readyToStartTesting,
+    nextTarget: nextVerificationTarget,
   });
 
   return (
@@ -279,11 +324,26 @@ export default function VerificationPanel({
       {verifyStepRunning && (
         <div className="mb-5 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900 flex items-center gap-3">
           <span className="h-5 w-5 rounded-full border-2 border-blue-200 border-t-blue-600 animate-spin flex-shrink-0" />
-          <span>Browsing website and capturing screenshot for Unit Testing comment…</span>
+          <span>Choosing the relevant page and capturing a screenshot for Unit Testing…</span>
         </div>
       )}
 
-      {pendingVerification && (
+      {readyToStartTesting && !verifyStepRunning && (
+        <div className="mb-5">
+          <button
+            type="button"
+            onClick={onStartVerification}
+            disabled={retryDisabled || retryingDeployment || mergeInProgress || startingVerification}
+            className="btn-primary"
+          >
+            {startingVerification
+              ? "Starting testing…"
+              : `Start Testing (${verificationEnvironmentLabel(nextVerificationTarget)})`}
+          </button>
+        </div>
+      )}
+
+      {pendingVerification && !verifyStepRunning && (
         <div className="mb-5">
           <PendingVerificationReview
             run={run}
@@ -292,6 +352,20 @@ export default function VerificationPanel({
             posting={postingVerification}
             onPost={onPostVerification}
           />
+        </div>
+      )}
+
+      {showLivePrMergePrompt && onMoveToPullRequest && (
+        <div className="mb-5 rounded-xl border border-slate-200 bg-slate-50 p-5 space-y-3">
+          <div>
+            <h4 className="font-semibold text-slate-900">Staging verification posted</h4>
+            <p className="text-sm text-slate-600 mt-1">
+              Continue in the Pull Request step to approve and merge the Live pull request.
+            </p>
+          </div>
+          <button type="button" onClick={onMoveToPullRequest} className="btn-primary">
+            Move to Pull Request step — Merge Live PR
+          </button>
         </div>
       )}
 

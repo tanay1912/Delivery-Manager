@@ -272,6 +272,8 @@ export interface WebsiteVerification {
   summary: string;
   findings: string[];
   screenshot_filename?: string | null;
+  page_type?: string | null;
+  page_reason?: string | null;
 }
 
 export interface PendingWebsiteVerification {
@@ -283,6 +285,8 @@ export interface PendingWebsiteVerification {
   draft_comment: string;
   screenshot_filename?: string | null;
   admin_paths?: string[];
+  page_type?: string | null;
+  page_reason?: string | null;
 }
 
 export interface DeploymentCommand {
@@ -565,6 +569,10 @@ export const api = {
     request<DeliveryRun>(`/api/runs/${id}/reload-jira`, { method: "POST" }),
   prepareEstimation: (id: string) =>
     request<DeliveryRun>(`/api/runs/${id}/prepare-estimation`, { method: "POST" }),
+  prepareQuestion: (id: string) =>
+    request<DeliveryRun>(`/api/runs/${id}/prepare-question`, { method: "POST" }),
+  reloadComment: (id: string) =>
+    request<DeliveryRun>(`/api/runs/${id}/reload-comment`, { method: "POST" }),
   postEstimation: (id: string, comment: string, hours: number) =>
     request<DeliveryRun>(`/api/runs/${id}/post-estimation`, {
       method: "POST",
@@ -597,13 +605,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ comment }),
     }),
+  startVerification: (id: string, target?: "beta" | "master") =>
+    request<DeliveryRun>(`/api/runs/${id}/start-verification`, {
+      method: "POST",
+      body: JSON.stringify(target ? { target } : {}),
+    }),
   verificationScreenshotUrl: (id: string, environment: string) =>
     `/api/runs/${id}/verification-screenshot?environment=${encodeURIComponent(environment)}`,
   jiraAttachmentUrl: (attachmentId: string) => `/api/runs/jira-attachment/${encodeURIComponent(attachmentId)}`,
-  applyRevision: (id: string, prompt: string) =>
+  applyRevision: (id: string, prompt: string, options?: { preview?: boolean }) =>
     request<DeliveryRun>(`/api/runs/${id}/apply-revision`, {
       method: "POST",
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({ prompt, preview: options?.preview ?? false }),
     }),
   declinePr: (id: string, reason = "") =>
     request<DeliveryRun>(`/api/runs/${id}/decline-pr`, {

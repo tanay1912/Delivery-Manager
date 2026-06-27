@@ -74,6 +74,8 @@ class WebsiteVerificationInfo(BaseModel):
     summary: str
     findings: list[str] = []
     screenshot_filename: str | None = None
+    page_type: str | None = None
+    page_reason: str | None = None
 
 
 class PendingWebsiteVerificationInfo(BaseModel):
@@ -85,6 +87,8 @@ class PendingWebsiteVerificationInfo(BaseModel):
     draft_comment: str
     screenshot_filename: str | None = None
     admin_paths: list[str] = []
+    page_type: str | None = None
+    page_reason: str | None = None
 
 
 class DeploymentCommandInfo(BaseModel):
@@ -235,6 +239,8 @@ def run_to_response(
             summary=str(v.get("summary", "")),
             findings=[str(item) for item in (v.get("findings") or []) if str(item).strip()],
             screenshot_filename=v.get("screenshot_filename"),
+            page_type=v.get("page_type"),
+            page_reason=v.get("page_reason"),
         )
         for v in (ctx.get("verifications") or [])
         if isinstance(v, dict)
@@ -256,6 +262,8 @@ def run_to_response(
                 for item in (pending_raw.get("admin_paths") or [])
                 if str(item).strip()
             ],
+            page_type=pending_raw.get("page_type"),
+            page_reason=pending_raw.get("page_reason"),
         )
 
     jira_comments = [
@@ -381,6 +389,7 @@ class RequestInfoRequest(BaseModel):
 
 class ApplyRevisionRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=8000)
+    preview: bool = False
 
 
 class DeclinePrRequest(BaseModel):
@@ -393,6 +402,10 @@ class RetryDeploymentRequest(BaseModel):
 
 class PostVerificationRequest(BaseModel):
     comment: str = Field(..., min_length=1)
+
+
+class StartVerificationRequest(BaseModel):
+    target: str | None = Field(default=None, pattern="^(beta|master)$")
 
 
 class RunListResponse(BaseModel):

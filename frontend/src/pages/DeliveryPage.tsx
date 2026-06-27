@@ -20,8 +20,11 @@ import VerificationPanel from "../components/VerificationPanel";
 import { useToast } from "../context/ToastContext";
 import {
   getActiveUiStep,
+  getMaxNavigableStep,
   getRevisionHistoryEntries,
   hasDeploymentAttempt,
+  inferNextVerificationTarget,
+  isMergeOrDeployRunning,
   isRevisionInProgress,
   isVerificationInProgress,
   resolveUiStepForRun,
@@ -556,9 +559,23 @@ const IMPLEMENTATION_SUBSTEPS = [
   { id: "create_pr_master", label: "Open Master pull request" },
 ] as const;
 
+const PR_CREATION_SUBSTEPS = IMPLEMENTATION_SUBSTEPS.slice(-4);
+
+const IMPLEMENTATION_SUBSTEPS_BEFORE_PR = IMPLEMENTATION_SUBSTEPS.slice(0, -4);
+
+const USER_TRIGGERED_IMPLEMENTATION_STEPS = new Set(["commit_changes", "confirm_local_changes"]);
+
+const POST_BUTTON_STEP_IDS = new Set([
+  "commit_changes",
+  "confirm_local_changes",
+  "create_pr_beta",
+  "create_pr_master",
+]);
+
 function implementationStepStatus(
   stepId: string,
   stepsLog: DeliveryRun["steps_log"],
+  creatingPrs = false,
 ): "done" | "active" | "pending" | "failed" {
   const entry = [...stepsLog].reverse().find((s) => s.step === stepId);
   if (entry?.status === "skipped") return "done";
@@ -567,7 +584,18 @@ function implementationStepStatus(
     return "failed";
   }
   if (entry?.status === "completed") return "done";
+  if (POST_BUTTON_STEP_IDS.has(stepId) && !creatingPrs) return "pending";
   if (entry?.status === "running") return "active";
+  if (USER_TRIGGERED_IMPLEMENTATION_STEPS.has(stepId)) {
+    if (creatingPrs) {
+      if (stepId === "commit_changes") return "active";
+      const commitDone = [...stepsLog]
+        .reverse()
+        .find((s) => s.step === "commit_changes")?.status === "completed";
+      if (commitDone) return "active";
+    }
+    return "pending";
+  }
   const order = IMPLEMENTATION_SUBSTEPS.map((s) => s.id);
   const idx = order.indexOf(stepId as (typeof order)[number]);
   if (idx <= 0) return "pending";
@@ -578,11 +606,19 @@ function implementationStepStatus(
   return "pending";
 }
 
-function ImplementationStepsList({ run }: { run: DeliveryRun }) {
+function ImplementationStepsList({
+  run,
+  creatingPrs = false,
+  steps = IMPLEMENTATION_SUBSTEPS,
+}: {
+  run: DeliveryRun;
+  creatingPrs?: boolean;
+  steps?: readonly { readonly id: string; readonly label: string }[];
+}) {
   return (
     <ol className="space-y-2">
-      {IMPLEMENTATION_SUBSTEPS.map((step) => {
-        const status = implementationStepStatus(step.id, run.steps_log);
+      {steps.map((step) => {
+        const status = implementationStepStatus(step.id, run.steps_log, creatingPrs);
         const entry = latestStepEntry(run.steps_log, step.id);
         const failureDetail =
           status === "failed" && entry?.message && entry.message !== step.label
@@ -977,6 +1013,7 @@ export default function DeliveryPage() {
   const [retryingDeployment, setRetryingDeployment] = useState(false);
   const [deployRetryTarget, setDeployRetryTarget] = useState<"beta" | "master" | null>(null);
   const [postingVerification, setPostingVerification] = useState(false);
+  const [startingVerification, setStartingVerification] = useState(false);
   const [applyingRevision, setApplyingRevision] = useState(false);
   const [decliningPr, setDecliningPr] = useState(false);
   const [declineReason, setDeclineReason] = useState("");
@@ -984,6 +1021,8 @@ export default function DeliveryPage() {
   const [selectedFile, setSelectedFile] = useState<{ path: string; action: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reloadingJira, setReloadingJira] = useState(false);
+  const [preparingQuestion, setPreparingQuestion] = useState(false);
+  const [reloadingComment, setReloadingComment] = useState(false);
   const [mergeConfirmTarget, setMergeConfirmTarget] = useState<"beta" | "master" | null>(null);
   const [declineConfirmOpen, setDeclineConfirmOpen] = useState(false);
   const { toast } = useToast();
@@ -996,6 +1035,7 @@ export default function DeliveryPage() {
   const lastWorkflowPhase = useRef<string | null>(null);
   const workflowStepRef = useRef(1);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const deploymentLogsRef = useRef<HTMLDivElement>(null);
   const commentEdited = useRef(false);
   const hoursEdited = useRef(false);
   const questionEdited = useRef(false);
@@ -1051,13 +1091,19 @@ export default function DeliveryPage() {
     setError(null);
     try {
       let current: DeliveryRun;
-      try {
-        current = await api.getRunByIssue(issueKey);
-      } catch (err) {
-        if (err instanceof ApiError && err.status === 404) {
-          current = await api.startRun(issueKey);
-        } else {
-          throw err;
+      // Start Delivery / Continue from the dashboard — always use startRun so step 1
+      // moves the Jira ticket to In Estimation.
+      if (navState.starting) {
+        current = await api.startRun(issueKey);
+      } else {
+        try {
+          current = await api.getRunByIssue(issueKey);
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 404) {
+            current = await api.startRun(issueKey);
+          } else {
+            throw err;
+          }
         }
       }
       setRun(current);
@@ -1074,7 +1120,7 @@ export default function DeliveryPage() {
     } finally {
       setLoading(false);
     }
-  }, [issueKey, handleAuthError, applyRunDrafts, navState.run]);
+  }, [issueKey, handleAuthError, applyRunDrafts, navState.run, navState.starting]);
 
   useEffect(() => {
     if (!loading) {
@@ -1119,6 +1165,8 @@ export default function DeliveryPage() {
       mergingBeta ||
       mergingMaster ||
       retryingDeployment ||
+      startingVerification ||
+      postingVerification ||
       (run.status === "running" &&
         (run.workflow_phase === "implementation" ||
           run.workflow_phase === "local_development" ||
@@ -1141,7 +1189,7 @@ export default function DeliveryPage() {
     poll();
     const intervalId = window.setInterval(poll, 2000);
     return () => window.clearInterval(intervalId);
-  }, [run?.id, run?.status, run?.workflow_phase, implementing, confirmingLocal, applyingRevision, mergingBeta, mergingMaster, retryingDeployment]);
+  }, [run?.id, run?.status, run?.workflow_phase, implementing, confirmingLocal, applyingRevision, mergingBeta, mergingMaster, retryingDeployment, startingVerification, postingVerification]);
 
   useEffect(() => {
     if (!run || !selectedFile) return;
@@ -1330,6 +1378,39 @@ export default function DeliveryPage() {
     }
   };
 
+  const handlePrepareQuestion = async () => {
+    if (!run) return;
+    setPreparingQuestion(true);
+    setError(null);
+    try {
+      const updated = await api.prepareQuestion(run.id);
+      setRun(updated);
+      questionEdited.current = false;
+      applyRunDrafts(updated);
+    } catch (err) {
+      handleAuthError(err);
+    } finally {
+      setPreparingQuestion(false);
+    }
+  };
+
+  const handleReloadComment = async () => {
+    if (!run) return;
+    setReloadingComment(true);
+    setError(null);
+    try {
+      const updated = await api.reloadComment(run.id);
+      setRun(updated);
+      commentEdited.current = false;
+      hoursEdited.current = false;
+      applyRunDrafts(updated);
+    } catch (err) {
+      handleAuthError(err);
+    } finally {
+      setReloadingComment(false);
+    }
+  };
+
   const handleStartImplementation = async () => {
     if (!run) return;
     setImplementing(true);
@@ -1361,7 +1442,12 @@ export default function DeliveryPage() {
         setError(updated.error_message);
         toast(updated.error_message, "error");
       } else {
-        toast("Pull requests created.", "success");
+        toast(
+          postPrImplementationUpdate
+            ? "Changes pushed and pull requests updated."
+            : "Pull requests created.",
+          "success",
+        );
       }
     } catch (err) {
       handleAuthError(err);
@@ -1379,6 +1465,7 @@ export default function DeliveryPage() {
     if (!run) return;
     setMergingBeta(true);
     setError(null);
+    selectViewStep(3);
     try {
       const updated = await api.mergeBetaRun(run.id);
       setRun(updated);
@@ -1387,6 +1474,9 @@ export default function DeliveryPage() {
         toast(updated.error_message, "error");
       } else {
         toast("Pull request merged — deployment started.", "success");
+        window.setTimeout(() => {
+          deploymentLogsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }, 150);
       }
     } catch (err) {
       handleAuthError(err);
@@ -1408,6 +1498,7 @@ export default function DeliveryPage() {
     if (!run) return;
     setMergingMaster(true);
     setError(null);
+    selectViewStep(3);
     try {
       const updated = await api.mergeMasterRun(run.id);
       setRun(updated);
@@ -1416,6 +1507,9 @@ export default function DeliveryPage() {
         toast(updated.error_message, "error");
       } else {
         toast("Live pull request merged — deployment started.", "success");
+        window.setTimeout(() => {
+          deploymentLogsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }, 150);
       }
     } catch (err) {
       handleAuthError(err);
@@ -1489,13 +1583,40 @@ export default function DeliveryPage() {
     }
   };
 
-  const handleApplyRevision = async () => {
+  const handleStartVerification = async () => {
+    if (!run) return;
+    const target = inferNextVerificationTarget(run);
+    if (!target) return;
+    setStartingVerification(true);
+    setError(null);
+    selectViewStep(4);
+    try {
+      const updated = await api.startVerification(run.id, target);
+      setRun(updated);
+      if (updated.error_message) {
+        setError(updated.error_message);
+        toast(updated.error_message, "error");
+      }
+    } catch (err) {
+      handleAuthError(err);
+      try {
+        const refreshed = await api.getRun(run.id);
+        setRun(refreshed);
+      } catch {
+        // Keep the surfaced API error if refresh fails.
+      }
+    } finally {
+      setStartingVerification(false);
+    }
+  };
+
+  const handleApplyRevision = async (options?: { preview?: boolean }) => {
     if (!run || !revisionPrompt.trim()) return;
     setApplyingRevision(true);
     setError(null);
     const prompt = revisionPrompt.trim();
     try {
-      const updated = await api.applyRevision(run.id, prompt);
+      const updated = await api.applyRevision(run.id, prompt, { preview: options?.preview });
       setRun(updated);
       setRevisionPrompt("");
       if (updated.workflow_phase === "local_development") {
@@ -1576,13 +1697,21 @@ export default function DeliveryPage() {
     (run?.status === "awaiting_approval" && !localDevelopmentReady) ||
     hasOpenPrs ||
     hasPostMergeWork;
+  const implementationCodeUpdateReady = Boolean(
+    run?.branch_name && (localDevelopmentReady || prReviewReady || phase === "completed"),
+  );
+  const postPrImplementationUpdate = Boolean(
+    hasOpenPrs || hasPostMergeWork || run?.beta_merged || run?.master_merged,
+  );
   const mergeInProgress =
     merging ||
     retryingDeployment ||
+    startingVerification ||
     (run?.status === "running" &&
       phase === "pr_review" &&
       prReviewReady &&
-      !deploymentFailed);
+      !deploymentFailed &&
+      isMergeOrDeployRunning(run));
   const verificationDone = phase === "completed" && run?.status === "completed";
   const implementationRunning =
     run?.status === "running" ||
@@ -1691,7 +1820,8 @@ export default function DeliveryPage() {
         )
       : [];
   const showActionBar = Boolean(run && prReviewReady && !verificationDone && viewStep === 3);
-  const actionDisabled = merging || decliningPr || revisionInProgress || postingVerification;
+  const actionDisabled =
+    merging || decliningPr || revisionInProgress || postingVerification || startingVerification;
   const showRequestChanges =
     run != null &&
     !deploymentAttempted &&
@@ -1725,7 +1855,7 @@ export default function DeliveryPage() {
     !deploymentFailed;
 
   const workflowStep = run ? getActiveUiStep(run) : 1;
-  const maxNavigableStep = workflowStep;
+  const maxNavigableStep = run ? getMaxNavigableStep(run) : workflowStep;
   const pipelineSteps = [
     { number: 1, label: "Estimation", status: step1Status },
     { number: 2, label: "Implementation", status: step2Status as "completed" | "active" | "pending" },
@@ -1983,7 +2113,7 @@ export default function DeliveryPage() {
                 <div className="px-6 py-4 border-b border-slate-200/80 bg-gradient-to-b from-slate-50/80 to-white">
                   <h2 className="card-title">Step 1 — Estimation</h2>
                   <p className="card-subtitle">
-                    AI generates the Jira comment below — edit if needed, then post
+                    Post a clarification question or review the AI estimation and post to Jira
                   </p>
                 </div>
               )}
@@ -2013,39 +2143,58 @@ export default function DeliveryPage() {
                     />
                   )}
 
+                {!preparing && !estimationPosted && (
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                    <p className="text-sm font-medium text-slate-900 mb-2">
+                      Need more information before estimating?
+                    </p>
+                    <div className="flex items-center justify-between gap-2 mb-1.5">
+                      <label className="label mb-0" htmlFor="question">
+                        Question to post in Jira
+                      </label>
+                      <div className="flex items-center gap-2">
+                        {run.draft_question?.trim() && (
+                          <span className="text-xs text-brand-600 font-medium">AI-generated — editable</span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={handlePrepareQuestion}
+                          disabled={preparingQuestion || run.status === "running"}
+                          className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:pointer-events-none"
+                        >
+                          <RefreshIcon className={`h-3 w-3 ${preparingQuestion ? "animate-spin" : ""}`} />
+                          {preparingQuestion ? "Preparing…" : "Prepare a Question"}
+                        </button>
+                      </div>
+                    </div>
+                    <textarea
+                      id="question"
+                      className="input min-h-[100px] resize-y text-sm leading-relaxed"
+                      value={question}
+                      onChange={(e) => {
+                        questionEdited.current = true;
+                        setQuestion(e.target.value);
+                      }}
+                      placeholder="AI will suggest numbered clarification questions based on the ticket heading, description, and comments"
+                    />
+                    <button
+                      onClick={handleRequestInfo}
+                      disabled={requestingInfo || !question.trim()}
+                      className="btn-secondary mt-3"
+                    >
+                      {requestingInfo ? "Posting…" : "Post question to Jira"}
+                    </button>
+                    <p className="text-xs text-slate-500 mt-2">
+                      Posts a comment and updates the ticket status to Waiting for information.
+                    </p>
+                  </div>
+                )}
+
                 {!preparing &&
                   (phase === "estimation" ||
                     (phase === "waiting_for_info" && run.estimation_prepared)) &&
                   !estimationPosted && (
                   <>
-                    {run.needs_clarification && (
-                      <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
-                        <p className="text-sm font-medium text-amber-900 mb-2">
-                          This ticket may need clarification before estimation
-                        </p>
-                        <label className="label mb-1.5" htmlFor="question">
-                          Question to post in Jira
-                        </label>
-                        <textarea
-                          id="question"
-                          className="input min-h-[100px] resize-y"
-                          value={question}
-                          onChange={(e) => {
-                            questionEdited.current = true;
-                            setQuestion(e.target.value);
-                          }}
-                          placeholder="What information is missing from this ticket?"
-                        />
-                        <button
-                          onClick={handleRequestInfo}
-                          disabled={requestingInfo}
-                          className="btn-secondary mt-3"
-                        >
-                          {requestingInfo ? "Posting…" : "Post question & set Waiting For Info"}
-                        </button>
-                      </div>
-                    )}
-
                     <div>
                       <label className="label mb-1.5" htmlFor="hours">
                         Original estimate (hours)
@@ -2072,9 +2221,20 @@ export default function DeliveryPage() {
                         <label className="label" htmlFor="comment">
                           Jira comment
                         </label>
-                        {commentForDisplay && (
-                          <span className="text-xs text-brand-600 font-medium">AI-generated — editable</span>
-                        )}
+                        <div className="flex items-center gap-2">
+                          {commentForDisplay && (
+                            <span className="text-xs text-brand-600 font-medium">AI-generated — editable</span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={handleReloadComment}
+                            disabled={reloadingComment || run.status === "running"}
+                            className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:pointer-events-none"
+                          >
+                            <RefreshIcon className={`h-3 w-3 ${reloadingComment ? "animate-spin" : ""}`} />
+                            {reloadingComment ? "Reloading…" : "Reload Estimation"}
+                          </button>
+                        </div>
                       </div>
                       <textarea
                         id="comment"
@@ -2096,7 +2256,7 @@ export default function DeliveryPage() {
                       {posting ? "Posting to Jira…" : "Post estimation to Jira"}
                     </button>
                     <p className="text-xs text-slate-500">
-                      Posts the comment and hours estimate to Jira and moves the ticket forward.
+                      Posts the comment and hours estimate to Jira and updates the status to Estimation Complete.
                     </p>
                   </>
                 )}
@@ -2133,25 +2293,7 @@ export default function DeliveryPage() {
 
             {viewStep === 2 && (
               <div className="space-y-4">
-                {prReviewReady ? (
-                  <section className="bg-white border border-gray-100 rounded-xl shadow-sm overflow-hidden">
-                    <div className="card-header">
-                      <h2 className="card-title">Step 2 — Implementation</h2>
-                      <p className="card-subtitle">{implementationSummary(run)}</p>
-                    </div>
-                    <div className="p-6 space-y-4">
-                      {run.branch_name && (
-                        <p className="text-sm text-slate-600">
-                          Branch:{" "}
-                          <code className="bg-gray-800 text-green-400 rounded px-2 py-0.5 text-xs font-mono">
-                            {run.branch_name}
-                          </code>
-                        </p>
-                      )}
-                      <ImplementationStepsList run={run} />
-                    </div>
-                  </section>
-                ) : localDevelopmentReady ? (
+                {localDevelopmentReady ? (
                   <>
                     <section className="bg-white border border-gray-100 rounded-xl shadow-sm overflow-hidden border-2 border-brand-400 shadow-brand-md">
                       <div className="px-6 py-3 border-b border-slate-100 bg-slate-50/50">
@@ -2170,7 +2312,11 @@ export default function DeliveryPage() {
                             </code>
                           </p>
                         )}
-                        <ImplementationStepsList run={run} />
+                        <ImplementationStepsList
+                          run={run}
+                          creatingPrs={confirmingLocal}
+                          steps={IMPLEMENTATION_SUBSTEPS_BEFORE_PR}
+                        />
                       </div>
                     </section>
                     <LocalDevelopmentPanel
@@ -2179,11 +2325,71 @@ export default function DeliveryPage() {
                       applyingRevision={applyingRevision}
                       revisionPrompt={revisionPrompt}
                       onRevisionPromptChange={setRevisionPrompt}
-                      onApplyRevision={() => void handleApplyRevision()}
-                      disabled={confirmingLocal}
+                      onApplyRevision={() => void handleApplyRevision({ preview: true })}
+                      disabled={confirmingLocal || applyingRevision}
                       onCreatePrs={() => void handleCreatePrs()}
+                      postPrUpdate={postPrImplementationUpdate}
+                      prSteps={
+                        <ImplementationStepsList
+                          run={run}
+                          creatingPrs={confirmingLocal}
+                          steps={PR_CREATION_SUBSTEPS}
+                        />
+                      }
                     />
                   </>
+                ) : implementationCodeUpdateReady ? (
+                  <>
+                    <section className="bg-white border border-gray-100 rounded-xl shadow-sm overflow-hidden">
+                      <div className="card-header">
+                        <h2 className="card-title">Step 2 — Implementation</h2>
+                        <p className="card-subtitle">{implementationSummary(run)}</p>
+                      </div>
+                      <div className="p-6 space-y-4">
+                        {run.branch_name && (
+                          <p className="text-sm text-slate-600">
+                            Branch:{" "}
+                            <code className="bg-gray-800 text-green-400 rounded px-2 py-0.5 text-xs font-mono">
+                              {run.branch_name}
+                            </code>
+                          </p>
+                        )}
+                        <ImplementationStepsList
+                          run={run}
+                          creatingPrs={confirmingLocal}
+                          steps={IMPLEMENTATION_SUBSTEPS_BEFORE_PR}
+                        />
+                      </div>
+                    </section>
+                    <LocalDevelopmentPanel
+                      run={run}
+                      creatingPrs={confirmingLocal}
+                      applyingRevision={applyingRevision}
+                      revisionPrompt={revisionPrompt}
+                      onRevisionPromptChange={setRevisionPrompt}
+                      onApplyRevision={() => void handleApplyRevision({ preview: true })}
+                      disabled={confirmingLocal || applyingRevision}
+                      onCreatePrs={() => void handleCreatePrs()}
+                      postPrUpdate
+                      prSteps={
+                        <ImplementationStepsList
+                          run={run}
+                          creatingPrs={confirmingLocal}
+                          steps={PR_CREATION_SUBSTEPS}
+                        />
+                      }
+                    />
+                  </>
+                ) : prReviewReady ? (
+                  <section className="bg-white border border-gray-100 rounded-xl shadow-sm overflow-hidden">
+                    <div className="card-header">
+                      <h2 className="card-title">Step 2 — Implementation</h2>
+                      <p className="card-subtitle">{implementationSummary(run)}</p>
+                    </div>
+                    <div className="p-6 space-y-4">
+                      <ImplementationStepsList run={run} />
+                    </div>
+                  </section>
                 ) : (
                   <section className={`bg-white border border-gray-100 rounded-xl shadow-sm overflow-hidden ${step2Status === "active" ? "border-2 border-brand-400 shadow-brand-md" : ""}`}>
                     {step2Status === "active" && (
@@ -2258,7 +2464,7 @@ export default function DeliveryPage() {
                 />
 
                 {(showStagingLogs || showLiveLogs) && (
-                  <div className="space-y-4">
+                  <div ref={deploymentLogsRef} className="space-y-4">
                     {showStagingLogs && (
                       <DeploymentLogsPanel
                         environment="beta"
@@ -2307,6 +2513,7 @@ export default function DeliveryPage() {
                 <ChangedFilesSection
                   files={run.changed_files}
                   selectedPath={selectedFile?.path ?? null}
+                  listKey={run.changed_files_refreshed_at ?? run.updated_at}
                   onSelect={(file) =>
                     setSelectedFile(file ? { path: file.path, action: file.action } : null)
                   }
@@ -2356,7 +2563,7 @@ export default function DeliveryPage() {
                       </div>
                     )}
                     <button
-                      onClick={handleApplyRevision}
+                      onClick={() => void handleApplyRevision()}
                       disabled={revisionInProgress || merging || !revisionPrompt.trim()}
                       className="btn-primary"
                     >
@@ -2525,6 +2732,9 @@ export default function DeliveryPage() {
                     retryDisabled={actionDisabled}
                     retryingDeployment={retryingDeployment}
                     mergeInProgress={mergeInProgress}
+                    startingVerification={startingVerification}
+                    onStartVerification={() => void handleStartVerification()}
+                    onMoveToPullRequest={() => selectViewStep(3)}
                     onPostVerification={(comment) => void handlePostVerification(comment)}
                     postingVerification={postingVerification}
                   />
