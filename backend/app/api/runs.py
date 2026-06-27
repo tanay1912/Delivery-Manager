@@ -49,6 +49,8 @@ from app.services.delivery_pipeline import (
     request_info,
     reset_run_to_estimation,
     reload_jira_issue,
+    recover_incomplete_implementation_pause,
+    recover_stuck_implementation_run,
     resume_open_pr_review_if_needed,
     resume_post_merge_workflow_if_needed,
     retry_deployment,
@@ -405,8 +407,9 @@ async def start_implementation_endpoint(
     if run.status == "running":
         raise HTTPException(status_code=409, detail="A step is already running")
 
+    run = await recover_incomplete_implementation_pause(db, run)
     phase = get_workflow_phase(run)
-    if phase in ("implementation", "pr_review") and run.status != "failed":
+    if phase in ("implementation", "pr_review") and run.status not in ("failed", "awaiting_approval"):
         raise HTTPException(status_code=409, detail="Implementation is already in progress")
     if phase == "local_development":
         return await _run_response(run, session, db)
@@ -470,6 +473,8 @@ async def get_run(
     run = await db.get(DeliveryRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
+    run = await recover_stuck_implementation_run(db, run)
+    run = await recover_incomplete_implementation_pause(db, run)
     run = await sync_jira_workflow_state(db, run, session)
     run = await sync_pr_review_state(db, run, session)
     return await _run_response(run, session, db)

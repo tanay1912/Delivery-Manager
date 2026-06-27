@@ -12,6 +12,7 @@ from app.services.delivery_pipeline import (
     resolve_draft_comment,
     resolve_ui_active_step,
 )
+from app.services.local_git import build_local_git_commands
 
 
 def _infer_pending_deploy_retry(run, ctx: dict) -> str | None:
@@ -144,6 +145,7 @@ class DeliveryRunResponse(BaseModel):
     changed_files_refreshed_at: str | None = None
     branch_name: str | None
     local_project_directory: str | None = None
+    local_git_commands: list[str] = []
     pr_url: str | None
     pr_id: int | None
     beta_pr_url: str | None = None
@@ -350,6 +352,12 @@ def run_to_response(
         changed_files_refreshed_at=ctx.get("changed_files_refreshed_at"),
         branch_name=run.branch_name,
         local_project_directory=(ctx.get("mapping") or {}).get("local_project_directory") or None,
+        local_git_commands=build_local_git_commands(
+            str((ctx.get("mapping") or {}).get("local_project_directory") or ""),
+            run.branch_name or ctx.get("branch_name") or "",
+            master_branch=str((ctx.get("mapping") or {}).get("master_branch") or "master"),
+            issue_key=run.jira_issue_key,
+        ),
         pr_url=run.pr_url or ctx.get("beta_pr_url"),
         pr_id=run.pr_id or ctx.get("beta_pr_id"),
         beta_pr_url=ctx.get("beta_pr_url") or run.pr_url,

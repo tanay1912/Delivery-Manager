@@ -335,6 +335,7 @@ export interface DeliveryRun {
   changed_files_refreshed_at: string | null;
   branch_name: string | null;
   local_project_directory: string | null;
+  local_git_commands: string[];
   pr_url: string | null;
   pr_id: number | null;
   beta_pr_url: string | null;

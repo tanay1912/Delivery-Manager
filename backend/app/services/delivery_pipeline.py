@@ -2,7 +2,7 @@ import asyncio
 import difflib
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -41,6 +41,7 @@ from app.services.deploy_commands import (
     fetch_deploy_commands_from_db,
 )
 from app.services.jira_fields import build_select_field_payload, filter_settable_transition_fields
+from app.services.local_git import build_local_git_commands, write_code_files_to_local
 from app.services.repo_stack import probe_repository_stack
 from app.services.ssh_deploy import (
     DeployError,
@@ -72,6 +73,7 @@ IMPLEMENTATION_STEPS: list[tuple[str, str]] = [
     ("create_branch", "Create branch from Master"),
     ("repo_stack", "Detect repository stack"),
     ("cursor_development", "Develop with Cursor SDK"),
+    ("generate_code", "Generate code changes"),
     ("commit_changes", "Commit changes to branch"),
     ("confirm_local_changes", "Create pull requests"),
     ("create_pr_beta", "Create pull request to Staging"),
@@ -115,10 +117,11 @@ PIPELINE_STEP_UI_STEP: dict[str, int] = {
     "create_branch": 2,
     "repo_stack": 2,
     "cursor_development": 2,
+    "generate_code": 2,
     "commit_changes": 2,
     "confirm_local_changes": 2,
-    "create_pr_beta": 3,
-    "create_pr_master": 3,
+    "create_pr_beta": 2,
+    "create_pr_master": 2,
     "merge_beta_pr": 3,
     "deploy_beta": 3,
     "merge_master_pr": 3,
@@ -129,13 +132,20 @@ PIPELINE_STEP_UI_STEP: dict[str, int] = {
 }
 
 
-def _derive_ui_active_step(run: DeliveryRun, phase: str, ctx: dict) -> int:
-    if phase == "completed" and run.status == "completed":
-        return 4
+def _are_pr_creation_steps_complete(run: DeliveryRun) -> bool:
+    return all(
+        _step_completed(run, step)
+        for step in (
+            "commit_changes",
+            "confirm_local_changes",
+            "create_pr_beta",
+            "create_pr_master",
+        )
+    )
 
-    _hydrate_merge_flags_from_steps(run, ctx)
-    mapping = ctx.get("mapping")
-    has_open_prs = bool(
+
+def _has_open_prs(run: DeliveryRun, ctx: dict) -> bool:
+    return bool(
         run.pr_id
         or ctx.get("beta_pr_id")
         or ctx.get("master_pr_id")
@@ -143,9 +153,28 @@ def _derive_ui_active_step(run: DeliveryRun, phase: str, ctx: dict) -> int:
         or ctx.get("beta_pr_url")
         or ctx.get("master_pr_url")
     )
+
+
+def _is_pr_review_ready_for_ui(run: DeliveryRun, phase: str, ctx: dict) -> bool:
+    has_open_prs = _has_open_prs(run, ctx)
     has_post_merge = bool(
         ctx.get("pending_deploy_retry") or ctx.get("beta_merged") or ctx.get("master_merged")
     )
+    if has_post_merge:
+        return True
+    if phase == "pr_review":
+        return _are_pr_creation_steps_complete(run) or has_open_prs
+    if run.status == "awaiting_approval" and phase != "local_development":
+        return _are_pr_creation_steps_complete(run)
+    return False
+
+
+def _derive_ui_active_step(run: DeliveryRun, phase: str, ctx: dict) -> int:
+    if phase == "completed" and run.status == "completed":
+        return 4
+
+    _hydrate_merge_flags_from_steps(run, ctx)
+    mapping = ctx.get("mapping")
     verifications = ctx.get("verifications") or []
 
     if _is_merge_or_deploy_running(run) or ctx.get("pending_deploy_retry"):
@@ -168,13 +197,7 @@ def _derive_ui_active_step(run: DeliveryRun, phase: str, ctx: dict) -> int:
     if verifications:
         return 4
 
-    pr_review_ready = (
-        phase == "pr_review"
-        or (run.status == "awaiting_approval" and phase != "local_development")
-        or has_open_prs
-        or has_post_merge
-    )
-    if pr_review_ready:
+    if _is_pr_review_ready_for_ui(run, phase, ctx):
         return 3
 
     if phase in {
@@ -203,6 +226,8 @@ def resolve_ui_active_step(
     derived = _derive_ui_active_step(run, phase, ctx)
     stored = ctx.get("ui_active_step")
     if isinstance(stored, int) and 1 <= stored <= 4:
+        if not _is_pr_review_ready_for_ui(run, phase, ctx) and stored > 2:
+            stored = 2
         if derived < stored and phase in {
             "estimation",
             "waiting_for_info",
@@ -211,7 +236,10 @@ def resolve_ui_active_step(
             "local_development",
         }:
             return derived
-        return max(stored, derived)
+        merged = max(stored, derived)
+        if not _is_pr_review_ready_for_ui(run, phase, ctx) and merged > 2:
+            return 2
+        return merged
     return derived
 
 
@@ -1607,6 +1635,60 @@ _IMPLEMENTATION_UPDATE_RESET_STEPS: dict[str, frozenset[str]] = {
 
 _IMPLEMENTATION_CODE_UPDATE_PHASES = frozenset({"local_development", "pr_review", "completed"})
 
+_IMPLEMENTATION_STUCK_AFTER = timedelta(hours=3)
+
+
+async def recover_stuck_implementation_run(
+    db: AsyncSession,
+    run: DeliveryRun,
+) -> DeliveryRun:
+    """Mark implementation as failed when the server lost the in-flight worker."""
+    if run.status != "running":
+        return run
+
+    phase = get_workflow_phase(run)
+    if phase not in ("implementation", "local_development"):
+        return run
+
+    updated_at = run.updated_at
+    if updated_at is None:
+        return run
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+
+    if datetime.now(timezone.utc) - updated_at < _IMPLEMENTATION_STUCK_AFTER:
+        return run
+
+    message = (
+        "Implementation stopped responding (timed out after 3 hours). "
+        "Reload the page and start implementation again."
+    )
+    run.status = "failed"
+    run.error_message = message
+    ctx = dict(run.context_data or {})
+    ctx["workflow_phase"] = "implementation"
+    run.context_data = ctx
+    await _log_step(db, run, "implementation", "failed", message)
+    await db.commit()
+    await db.refresh(run)
+    return run
+
+
+async def recover_incomplete_implementation_pause(
+    db: AsyncSession,
+    run: DeliveryRun,
+) -> DeliveryRun:
+    """Move to local_development when code generation finished but the pause step did not commit."""
+    if get_workflow_phase(run) != "implementation":
+        return run
+    if _step_completed(run, "confirm_local_changes"):
+        return run
+    if run.status != "awaiting_approval":
+        return run
+    if not (_step_resolved(run, "generate_code") or _step_resolved(run, "cursor_development")):
+        return run
+    return await _pause_for_local_confirmation(db, run, dict(run.context_data or {}))
+
 
 def _has_pending_local_code_preview(run: DeliveryRun, ctx: dict) -> bool:
     """True when generated code was revised locally but not yet committed to the branch."""
@@ -2632,14 +2714,43 @@ async def start_implementation(
 
         dev_automated = cursor_configured(session) or openai_configured(session)
         if dev_automated:
-            if not _step_completed(run, "cursor_development"):
+            if not _step_resolved(run, "cursor_development"):
+                await _log_step(
+                    db,
+                    run,
+                    "cursor_development",
+                    "running",
+                    "Developing changes with Cursor SDK…",
+                )
                 result = await _step_cursor_development(db, run, jira, ctx, session)
                 await _complete_step(db, run, ctx, "cursor_development", result[0], result[1] or None)
+                if (ctx.get("development_result") or {}).get("source") == "cursor_sdk":
+                    await _refresh_run_changed_files(run, ctx, session)
+                    run.context_data = ctx
+                    await db.commit()
 
             if (ctx.get("development_result") or {}).get("source") != "cursor_sdk":
-                if not _step_completed(run, "generate_code"):
+                if not _step_resolved(run, "generate_code"):
+                    await _log_step(
+                        db,
+                        run,
+                        "generate_code",
+                        "running",
+                        "Generating code changes with AI…",
+                    )
                     result = await _step_generate_code(db, run, jira, ctx, session)
                     await _complete_step(db, run, ctx, "generate_code", result[0], result[1] or None)
+                    _populate_changed_files_from_code_result(ctx)
+                    run.context_data = ctx
+                    await db.commit()
+            elif not _step_resolved(run, "generate_code"):
+                await _log_step(
+                    db,
+                    run,
+                    "generate_code",
+                    "skipped",
+                    "Code generated and committed on the feature branch by Cursor SDK",
+                )
         elif not _step_completed(run, "cursor_development"):
             await _log_step(
                 db,
@@ -2714,6 +2825,18 @@ def _populate_changed_files_from_code_result(ctx: dict) -> None:
         ctx["changed_files_refreshed_at"] = datetime.now(timezone.utc).isoformat()
 
 
+def _local_project_directory(ctx: dict) -> str:
+    return str((ctx.get("mapping") or {}).get("local_project_directory") or "").strip()
+
+
+def _sync_generated_files_to_local(ctx: dict) -> int:
+    project_dir = _local_project_directory(ctx)
+    if not project_dir:
+        return 0
+    files = (ctx.get("code_result") or {}).get("files") or []
+    return write_code_files_to_local(project_dir, files)
+
+
 async def _prepare_local_development(
     db: AsyncSession,
     run: DeliveryRun,
@@ -2722,12 +2845,18 @@ async def _prepare_local_development(
 ) -> None:
     """After code generation: surface changed files for review before opening pull requests."""
     _populate_changed_files_from_code_result(ctx)
-    if _step_completed(run, "commit_changes"):
+    dev_source = (ctx.get("development_result") or {}).get("source")
+    needs_branch_diff = (
+        _step_completed(run, "commit_changes")
+        or dev_source == "cursor_sdk"
+        or not ctx.get("changed_files")
+    )
+    if needs_branch_diff:
         await _refresh_run_changed_files(run, ctx, session)
-    elif not ctx.get("changed_files"):
-        await _refresh_run_changed_files(run, ctx, session)
+    if not ctx.get("changed_files"):
         _populate_changed_files_from_code_result(ctx)
 
+    _sync_generated_files_to_local(ctx)
     run.context_data = ctx
     await db.commit()
 
@@ -2745,6 +2874,19 @@ async def _commit_pending_changes(
 
     code_result = ctx.get("code_result") or {}
     files = code_result.get("files") or []
+    project_dir = _local_project_directory(ctx)
+
+    if not files and project_dir:
+        branch_name = run.branch_name or ctx.get("branch_name") or "feature branch"
+        await _complete_step(
+            db,
+            run,
+            ctx,
+            "commit_changes",
+            f"Using commits from local project `{project_dir}` on `{branch_name}`",
+        )
+        return
+
     if not files and _step_completed(run, "cursor_development") and not _step_completed(run, "generate_code"):
         await _complete_step(
             db,
@@ -2764,10 +2906,20 @@ async def _pause_for_local_confirmation(
     run: DeliveryRun,
     ctx: dict,
 ) -> DeliveryRun:
+    branch_name = run.branch_name or ctx.get("branch_name") or "feature branch"
+    _sync_generated_files_to_local(ctx)
     ctx["workflow_phase"] = "local_development"
+    ctx["ui_active_step"] = 2
     run.context_data = ctx
     run.status = "awaiting_approval"
     run.error_message = None
+    await _log_step(
+        db,
+        run,
+        "confirm_local_changes",
+        "running",
+        f"Branch `{branch_name}` is ready — review changes locally or in the app, then create pull requests",
+    )
     await db.commit()
     await db.refresh(run)
     return run
@@ -2791,6 +2943,7 @@ async def _complete_pr_creation(
     await _refresh_run_changed_files(run, ctx, session)
 
     ctx["workflow_phase"] = "pr_review"
+    ctx["ui_active_step"] = 3
     run.context_data = ctx
     run.status = "awaiting_approval"
 
@@ -4440,13 +4593,19 @@ async def apply_local_code_revision(
             f"Generated changes: {', '.join(change_parts)}",
         )
 
-        project_dir = (mapping.get("local_project_directory") or "").strip() if mapping else ""
+        project_dir = _local_project_directory(ctx)
+        if project_dir:
+            _sync_generated_files_to_local(ctx)
         await _log_step(
             db,
             run,
             "revision_commit",
             "completed",
-            "Updated generated code — create pull requests when ready",
+            (
+                f"Updated generated code in `{project_dir}` — create pull requests when ready"
+                if project_dir
+                else "Updated generated code — create pull requests when ready"
+            ),
         )
 
         _invalidate_generated_code_steps(run)
@@ -4573,7 +4732,8 @@ async def apply_code_revision(
             rules = (mapping.get("rules") or "").strip()
             skills = (mapping.get("skills") or "").strip()
             try:
-                result = run_revision_agent(
+                result = await asyncio.to_thread(
+                    run_revision_agent,
                     issue_key=run.jira_issue_key,
                     summary=ctx.get("summary", run.summary),
                     description=_ticket_context_for_ai(ctx),
@@ -5319,7 +5479,8 @@ async def _step_cursor_development(db, run, jira, ctx, session) -> tuple[str, di
     if cursor_configured(session):
         repo_url = BitbucketClient.repo_html_url(mapping["workspace"], mapping["repo_slug"])
         try:
-            result = run_implementation_agent(
+            result = await asyncio.to_thread(
+                run_implementation_agent,
                 issue_key=run.jira_issue_key,
                 summary=ctx.get("summary", run.summary),
                 description=_ticket_context_for_ai(ctx),

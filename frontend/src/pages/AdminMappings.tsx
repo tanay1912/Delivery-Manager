@@ -1143,6 +1143,20 @@ export default function AdminMappings() {
                           )}
 
                           <label className="block space-y-1.5">
+                            <span className="label">Local project directory</span>
+                            <input
+                              type="text"
+                              placeholder="/var/www/html/myproject"
+                              value={form.local_project_directory}
+                              onChange={(e) => setForm({ ...form, local_project_directory: e.target.value })}
+                              className="input font-mono"
+                            />
+                            <span className="text-xs text-slate-500">
+                              Path to this repo on your development machine. Shown in delivery workflow git commands.
+                            </span>
+                          </label>
+
+                          <label className="block space-y-1.5">
                             <span className="label">Project root directory</span>
                             <input
                               type="text"

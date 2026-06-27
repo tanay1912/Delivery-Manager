@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
-import { api, ApiError, DeliveryRun, User } from "../api/client";
+import { api, ApiError, ChangedFile, DeliveryRun, User } from "../api/client";
 import AIWorkingPanel, { BOOT_STEPS, PREPARE_STEPS } from "../components/AIWorkingPanel";
 import ChangedFilesSection from "../components/ChangedFilesSection";
 import ConfirmModal from "../components/ConfirmModal";
@@ -24,7 +24,9 @@ import {
   getRevisionHistoryEntries,
   hasDeploymentAttempt,
   inferNextVerificationTarget,
+  isImplementationReviewReady,
   isMergeOrDeployRunning,
+  isPrReviewReady,
   isRevisionInProgress,
   isVerificationInProgress,
   resolveUiStepForRun,
@@ -395,10 +397,18 @@ function RevisionStepsList({
     <ol className="space-y-2">
       {REVISION_SUBSTEPS.map((step) => {
         const status = revisionStepStatus(step.id, run.steps_log, active);
+        const entry = latestStepEntry(run.steps_log, step.id);
+        const activeDetail =
+          status === "active" &&
+          entry?.status === "running" &&
+          entry.message &&
+          entry.message !== step.label
+            ? entry.message
+            : null;
         return (
           <li
             key={step.id}
-            className={`flex items-center gap-3 rounded-xl px-4 py-3 text-sm ${
+            className={`rounded-xl px-4 py-3 text-sm ${
               status === "active"
                 ? "bg-white border border-brand-200"
                 : status === "done"
@@ -408,22 +418,29 @@ function RevisionStepsList({
                     : "bg-slate-50/50 border border-transparent"
             }`}
           >
-            <PrepareStepIcon
-              status={status === "failed" ? "pending" : status === "done" ? "done" : status}
-            />
-            <span
-              className={
-                status === "active"
-                  ? "font-medium text-brand-800"
-                  : status === "done"
-                    ? "text-brand-800"
-                    : status === "failed"
-                      ? "text-red-700"
-                      : "text-slate-400"
-              }
-            >
-              {step.label}
-            </span>
+            <div className="flex items-center gap-3">
+              <PrepareStepIcon
+                status={status === "failed" ? "pending" : status === "done" ? "done" : status}
+              />
+              <span
+                className={
+                  status === "active"
+                    ? "font-medium text-brand-800"
+                    : status === "done"
+                      ? "text-brand-800"
+                      : status === "failed"
+                        ? "text-red-700"
+                        : "text-slate-400"
+                }
+              >
+                {step.label}
+              </span>
+            </div>
+            {activeDetail && (
+              <p className="mt-2 ml-9 text-xs text-brand-700 whitespace-pre-wrap break-words">
+                {activeDetail}
+              </p>
+            )}
           </li>
         );
       })}
@@ -600,7 +617,7 @@ function implementationStepStatus(
   const idx = order.indexOf(stepId as (typeof order)[number]);
   if (idx <= 0) return "pending";
   const prev = order[idx - 1];
-  const prevEntry = stepsLog.find((s) => s.step === prev);
+  const prevEntry = [...stepsLog].reverse().find((s) => s.step === prev);
   if (prevEntry?.status === "completed" || prevEntry?.status === "skipped") return "active";
   if (prevEntry?.status === "failed" && prev === "transition_in_progress") return "active";
   return "pending";
@@ -610,20 +627,32 @@ function ImplementationStepsList({
   run,
   creatingPrs = false,
   steps = IMPLEMENTATION_SUBSTEPS,
+  selectedFilePath = null,
+  onSelectFile,
 }: {
   run: DeliveryRun;
   creatingPrs?: boolean;
   steps?: readonly { readonly id: string; readonly label: string }[];
+  selectedFilePath?: string | null;
+  onSelectFile?: (file: ChangedFile | null) => void;
 }) {
   return (
     <ol className="space-y-2">
       {steps.map((step) => {
         const status = implementationStepStatus(step.id, run.steps_log, creatingPrs);
         const entry = latestStepEntry(run.steps_log, step.id);
-        const failureDetail =
-          status === "failed" && entry?.message && entry.message !== step.label
+        const statusDetail =
+          entry?.message && entry.message !== step.label
             ? entry.message
             : null;
+        const failureDetail = status === "failed" ? statusDetail : null;
+        const activeDetail = status === "active" ? statusDetail : null;
+        const doneDetail =
+          step.id === "generate_code" && status === "done" && statusDetail ? statusDetail : null;
+        const showGenerateCodeFiles =
+          step.id === "generate_code" &&
+          (status === "done" || entry?.status === "skipped") &&
+          run.changed_files.length > 0;
         return (
           <li
             key={step.id}
@@ -655,10 +684,31 @@ function ImplementationStepsList({
                 {step.label}
               </span>
             </div>
+            {activeDetail && (
+              <p className="mt-2 ml-9 text-xs text-brand-700 whitespace-pre-wrap break-words">
+                {activeDetail}
+              </p>
+            )}
+            {doneDetail && (
+              <p className="mt-2 ml-9 text-xs text-brand-700 whitespace-pre-wrap break-words">
+                {doneDetail}
+              </p>
+            )}
             {failureDetail && (
               <p className="mt-2 ml-9 text-xs text-red-700 whitespace-pre-wrap break-words">
                 {failureDetail}
               </p>
+            )}
+            {showGenerateCodeFiles && onSelectFile && (
+              <div className="mt-3 ml-9">
+                <ChangedFilesSection
+                  files={run.changed_files}
+                  selectedPath={selectedFilePath}
+                  defaultExpanded
+                  listKey={run.changed_files_refreshed_at ?? run.updated_at}
+                  onSelect={onSelectFile}
+                />
+              </div>
             )}
           </li>
         );
@@ -1172,7 +1222,7 @@ export default function DeliveryPage() {
           run.workflow_phase === "local_development" ||
           run.workflow_phase === "pr_review")) ||
       (run.status === "awaiting_approval" &&
-        run.workflow_phase === "pr_review" &&
+        (run.workflow_phase === "pr_review" || run.workflow_phase === "local_development") &&
         !waitingForDeployRetry);
 
     if (!shouldPoll) return;
@@ -1692,11 +1742,8 @@ export default function DeliveryPage() {
     "completed",
   ].includes(phase);
   const localDevelopmentReady = phase === "local_development";
-  const prReviewReady =
-    phase === "pr_review" ||
-    (run?.status === "awaiting_approval" && !localDevelopmentReady) ||
-    hasOpenPrs ||
-    hasPostMergeWork;
+  const codeReviewReady = run ? isImplementationReviewReady(run) : false;
+  const prReviewReady = run ? isPrReviewReady(run) : false;
   const implementationCodeUpdateReady = Boolean(
     run?.branch_name && (localDevelopmentReady || prReviewReady || phase === "completed"),
   );
@@ -1716,6 +1763,10 @@ export default function DeliveryPage() {
   const implementationRunning =
     run?.status === "running" ||
     ((phase === "implementation" || phase === "local_development") && run?.status !== "failed");
+  const showImplementationSpinner =
+    !codeReviewReady &&
+    (implementing ||
+      (run?.status === "running" && run?.workflow_phase === "implementation"));
   const revisionInProgress = run ? isRevisionInProgress(run, applyingRevision) : applyingRevision;
   const deploymentAttempted = run ? hasDeploymentAttempt(run) : false;
   const resolvedComment = run ? resolveDraftComment(run) : "";
@@ -2084,40 +2135,32 @@ export default function DeliveryPage() {
                   </section>
                 )}
 
-                {estimationPosted ? (
-                  <section className="bg-white border border-gray-100 rounded-xl shadow-sm overflow-hidden">
-                    <div className="card-header">
+                <section className={`bg-white border border-gray-100 rounded-xl shadow-sm overflow-hidden ${step1Status === "active" ? "border-2 border-brand-400 shadow-brand-md" : ""}`}>
+                  {step1Status === "active" && (
+                    <div className="px-6 py-3 border-b border-slate-100 bg-slate-50/50">
+                      <span className="rounded-full bg-brand-100 px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide text-brand-700">
+                        Current Step
+                      </span>
+                      <h2 className="text-lg font-bold text-brand-600 mt-2">Step 1 — Estimation</h2>
+                    </div>
+                  )}
+                  {step1Status !== "active" && (
+                    <div className="px-6 py-4 border-b border-slate-200/80 bg-gradient-to-b from-slate-50/80 to-white">
                       <h2 className="card-title">Step 1 — Estimation</h2>
-                      <p className="card-subtitle">Posted to Jira</p>
+                      <p className="card-subtitle">
+                        Post a clarification question or review the AI estimation and post to Jira
+                      </p>
                     </div>
-                    <div className="p-6">
-                      <SuccessBanner>
-                        <p className="font-medium">Estimation posted to Jira</p>
-                        <p className="mt-0.5">
-                          {run.estimation_hours}h — ticket moved to Estimation Complete.
-                        </p>
-                      </SuccessBanner>
-                    </div>
-                  </section>
-                ) : (
-                  <section className={`bg-white border border-gray-100 rounded-xl shadow-sm overflow-hidden ${step1Status === "active" ? "border-2 border-brand-400 shadow-brand-md" : ""}`}>
-              {step1Status === "active" && (
-                <div className="px-6 py-3 border-b border-slate-100 bg-slate-50/50">
-                  <span className="rounded-full bg-brand-100 px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide text-brand-700">
-                    Current Step
-                  </span>
-                  <h2 className="text-lg font-bold text-brand-600 mt-2">Step 1 — Estimation</h2>
-                </div>
-              )}
-              {step1Status !== "active" && (
-                <div className="px-6 py-4 border-b border-slate-200/80 bg-gradient-to-b from-slate-50/80 to-white">
-                  <h2 className="card-title">Step 1 — Estimation</h2>
-                  <p className="card-subtitle">
-                    Post a clarification question or review the AI estimation and post to Jira
-                  </p>
-                </div>
-              )}
-              <div className="p-6 space-y-5">
+                  )}
+                  <div className="p-6 space-y-5">
+                {estimationPosted && (
+                  <SuccessBanner>
+                    <p className="font-medium">Estimation posted to Jira</p>
+                    <p className="mt-0.5">
+                      {run.estimation_hours}h — ticket moved to Estimation Complete.
+                    </p>
+                  </SuccessBanner>
+                )}
                 {preparing && (
                   <AIWorkingPanel
                     issueKey={run.jira_issue_key}
@@ -2143,7 +2186,7 @@ export default function DeliveryPage() {
                     />
                   )}
 
-                {!preparing && !estimationPosted && (
+                {!preparing && (
                   <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
                     <p className="text-sm font-medium text-slate-900 mb-2">
                       Need more information before estimating?
@@ -2154,12 +2197,13 @@ export default function DeliveryPage() {
                       </label>
                       <div className="flex items-center gap-2">
                         {run.draft_question?.trim() && (
+                         
                           <span className="text-xs text-brand-600 font-medium">AI-generated — editable</span>
                         )}
                         <button
                           type="button"
                           onClick={handlePrepareQuestion}
-                          disabled={preparingQuestion || run.status === "running"}
+                          disabled={preparingQuestion || run.status === "running" || estimationPosted}
                           className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:pointer-events-none"
                         >
                           <RefreshIcon className={`h-3 w-3 ${preparingQuestion ? "animate-spin" : ""}`} />
@@ -2171,6 +2215,7 @@ export default function DeliveryPage() {
                       id="question"
                       className="input min-h-[100px] resize-y text-sm leading-relaxed"
                       value={question}
+                      readOnly={estimationPosted}
                       onChange={(e) => {
                         questionEdited.current = true;
                         setQuestion(e.target.value);
@@ -2179,7 +2224,7 @@ export default function DeliveryPage() {
                     />
                     <button
                       onClick={handleRequestInfo}
-                      disabled={requestingInfo || !question.trim()}
+                      disabled={requestingInfo || !question.trim() || estimationPosted}
                       className="btn-secondary mt-3"
                     >
                       {requestingInfo ? "Posting…" : "Post question to Jira"}
@@ -2190,10 +2235,7 @@ export default function DeliveryPage() {
                   </div>
                 )}
 
-                {!preparing &&
-                  (phase === "estimation" ||
-                    (phase === "waiting_for_info" && run.estimation_prepared)) &&
-                  !estimationPosted && (
+                {!preparing && (run.estimation_prepared || estimationPosted) && (
                   <>
                     <div>
                       <label className="label mb-1.5" htmlFor="hours">
@@ -2206,6 +2248,7 @@ export default function DeliveryPage() {
                         step="0.5"
                         className="input max-w-[160px]"
                         value={hours}
+                        readOnly={estimationPosted}
                         onChange={(e) => {
                           hoursEdited.current = true;
                           setHours(e.target.value);
@@ -2228,7 +2271,7 @@ export default function DeliveryPage() {
                           <button
                             type="button"
                             onClick={handleReloadComment}
-                            disabled={reloadingComment || run.status === "running"}
+                            disabled={reloadingComment || run.status === "running" || estimationPosted}
                             className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:pointer-events-none"
                           >
                             <RefreshIcon className={`h-3 w-3 ${reloadingComment ? "animate-spin" : ""}`} />
@@ -2240,6 +2283,7 @@ export default function DeliveryPage() {
                         id="comment"
                         className="input min-h-[200px] resize-y text-sm leading-relaxed"
                         value={commentForDisplay}
+                        readOnly={estimationPosted}
                         placeholder="AI comment will appear here for you to review and edit"
                         onChange={(e) => {
                           commentEdited.current = true;
@@ -2248,6 +2292,8 @@ export default function DeliveryPage() {
                       />
                     </div>
 
+                    {!estimationPosted && (
+                      <>
                     <button
                       onClick={handlePostEstimation}
                       disabled={posting || !commentForDisplay.trim()}
@@ -2258,6 +2304,8 @@ export default function DeliveryPage() {
                     <p className="text-xs text-slate-500">
                       Posts the comment and hours estimate to Jira and updates the status to Estimation Complete.
                     </p>
+                      </>
+                    )}
                   </>
                 )}
 
@@ -2282,7 +2330,6 @@ export default function DeliveryPage() {
 
               </div>
             </section>
-                )}
                 <DeliveryStepNav
                   viewStep={viewStep}
                   maxNavigableStep={maxNavigableStep}
@@ -2293,7 +2340,7 @@ export default function DeliveryPage() {
 
             {viewStep === 2 && (
               <div className="space-y-4">
-                {localDevelopmentReady ? (
+                {codeReviewReady ? (
                   <>
                     <section className="bg-white border border-gray-100 rounded-xl shadow-sm overflow-hidden border-2 border-brand-400 shadow-brand-md">
                       <div className="px-6 py-3 border-b border-slate-100 bg-slate-50/50">
@@ -2316,7 +2363,20 @@ export default function DeliveryPage() {
                           run={run}
                           creatingPrs={confirmingLocal}
                           steps={IMPLEMENTATION_SUBSTEPS_BEFORE_PR}
+                          selectedFilePath={selectedFile?.path ?? null}
+                          onSelectFile={(file) =>
+                            setSelectedFile(file ? { path: file.path, action: file.action } : null)
+                          }
                         />
+                        {selectedFile && (
+                          <FileDiffViewer
+                            runId={run.id}
+                            filePath={selectedFile.path}
+                            action={selectedFile.action}
+                            refreshKey={run.changed_files_refreshed_at ?? run.updated_at}
+                            onClose={() => setSelectedFile(null)}
+                          />
+                        )}
                       </div>
                     </section>
                     <LocalDevelopmentPanel
@@ -2329,6 +2389,7 @@ export default function DeliveryPage() {
                       disabled={confirmingLocal || applyingRevision}
                       onCreatePrs={() => void handleCreatePrs()}
                       postPrUpdate={postPrImplementationUpdate}
+                      showFileList={false}
                       prSteps={
                         <ImplementationStepsList
                           run={run}
@@ -2409,14 +2470,47 @@ export default function DeliveryPage() {
                       </div>
                     )}
                     <div className="p-6 space-y-5">
-                      {implementing || implementationRunning ? (
+                      {showImplementationSpinner ? (
                         <>
                           <p className="text-sm italic text-slate-500 flex items-center gap-2">
                             <span className="h-4 w-4 rounded-full border-2 border-slate-300 border-t-brand-600 animate-spin flex-shrink-0" />
                             System is running implementation — generating code and preparing your review…
                           </p>
-                          <ImplementationStepsList run={run} />
+                          {run.error_message && (
+                            <p className="text-sm text-red-700">{run.error_message}</p>
+                          )}
+                          <ImplementationStepsList
+                            run={run}
+                            selectedFilePath={selectedFile?.path ?? null}
+                            onSelectFile={(file) =>
+                              setSelectedFile(file ? { path: file.path, action: file.action } : null)
+                            }
+                          />
+                          {selectedFile && (
+                            <FileDiffViewer
+                              runId={run.id}
+                              filePath={selectedFile.path}
+                              action={selectedFile.action}
+                              refreshKey={run.changed_files_refreshed_at ?? run.updated_at}
+                              onClose={() => setSelectedFile(null)}
+                            />
+                          )}
                         </>
+                      ) : run?.status === "failed" && phase === "implementation" ? (
+                        <div className="space-y-3">
+                          <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+                            <p className="font-medium">Implementation failed</p>
+                            {run.error_message && (
+                              <p className="mt-1 whitespace-pre-wrap">{run.error_message}</p>
+                            )}
+                          </div>
+                          <button
+                            onClick={handleStartImplementation}
+                            className="w-full sm:w-auto min-w-48 rounded-lg bg-brand-600 px-6 py-3 text-sm font-semibold text-white shadow-brand hover:bg-brand-700 hover:shadow-brand-md transition-colors"
+                          >
+                            Retry implementation
+                          </button>
+                        </div>
                       ) : (
                         <div className="space-y-2">
                           <button

@@ -18,6 +18,84 @@ const MERGE_DEPLOY_STEP_IDS = [
   "verify_master",
 ] as const;
 
+export const PR_CREATION_STEP_IDS = [
+  "commit_changes",
+  "confirm_local_changes",
+  "create_pr_beta",
+  "create_pr_master",
+] as const;
+
+/** True when the generate_code pipeline step has finished (or was skipped for Cursor SDK). */
+export function isCodeGenerationResolved(run: DeliveryRun): boolean {
+  const status = latestStepStatus(run.steps_log ?? [], "generate_code");
+  return status === "completed" || status === "skipped";
+}
+
+/** True when the cursor_development pipeline step has finished. */
+export function isCursorDevelopmentResolved(run: DeliveryRun): boolean {
+  const status = latestStepStatus(run.steps_log ?? [], "cursor_development");
+  return status === "completed" || status === "skipped";
+}
+
+/** True when generated code is ready for review on Step 2 (before PRs exist). */
+export function isImplementationReviewReady(run: DeliveryRun): boolean {
+  if (run.workflow_phase === "local_development") {
+    return run.status === "awaiting_approval" || run.status === "completed";
+  }
+  // Surface the review UI while the pipeline finishes after code generation.
+  if (
+    run.workflow_phase === "implementation" &&
+    (run.status === "running" || run.status === "awaiting_approval") &&
+    run.changed_files.length > 0 &&
+    (isCodeGenerationResolved(run) || isCursorDevelopmentResolved(run))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export function arePrCreationStepsComplete(run: DeliveryRun): boolean {
+  const stepsLog = run.steps_log ?? [];
+  return PR_CREATION_STEP_IDS.every((stepId) => {
+    const status = latestStepStatus(stepsLog, stepId);
+    return status === "completed" || status === "skipped";
+  });
+}
+
+function runHasOpenPrs(run: DeliveryRun): boolean {
+  return Boolean(
+    run.beta_pr_id ||
+      run.pr_id ||
+      run.beta_pr_url ||
+      run.pr_url ||
+      run.master_pr_id ||
+      run.master_pr_url,
+  );
+}
+
+function runHasPostMergeWork(run: DeliveryRun): boolean {
+  return Boolean(run.pending_deploy_retry || run.beta_merged || run.master_merged);
+}
+
+/** True when the Pull Request step should be shown and navigable. */
+export function isPrReviewReady(run: DeliveryRun): boolean {
+  const phase = run.workflow_phase;
+  const hasOpenPrs = runHasOpenPrs(run);
+  const hasPostMergeWork = runHasPostMergeWork(run);
+
+  if (hasPostMergeWork) return true;
+
+  if (phase === "pr_review") {
+    return arePrCreationStepsComplete(run) || hasOpenPrs;
+  }
+
+  if (run.status === "awaiting_approval" && phase !== "local_development") {
+    return arePrCreationStepsComplete(run);
+  }
+
+  return false;
+}
+
 export function latestStepEntry(stepsLog: DeliveryRun["steps_log"], stepId: string) {
   const entries = stepsLog.filter((s) => s.step === stepId);
   return entries[entries.length - 1];
@@ -190,17 +268,6 @@ export function isVerificationInProgress(run: DeliveryRun): boolean {
 
 export function getActiveUiStep(run: DeliveryRun): number {
   const phase = run.workflow_phase;
-  const hasOpenPrs = Boolean(
-    run.beta_pr_id ||
-      run.pr_id ||
-      run.beta_pr_url ||
-      run.pr_url ||
-      run.master_pr_id ||
-      run.master_pr_url,
-  );
-  const hasPostMergeWork = Boolean(
-    run.pending_deploy_retry || run.beta_merged || run.master_merged,
-  );
   const estimationPosted = [
     "ready_for_implementation",
     "implementation",
@@ -209,11 +276,7 @@ export function getActiveUiStep(run: DeliveryRun): number {
     "completed",
   ].includes(phase);
   const verificationDone = phase === "completed" && run.status === "completed";
-  const prReviewReady =
-    phase === "pr_review" ||
-    (run.status === "awaiting_approval" && phase !== "local_development") ||
-    hasOpenPrs ||
-    hasPostMergeWork;
+  const prReviewReady = isPrReviewReady(run);
 
   let computed = 1;
   if (verificationDone) {
@@ -240,6 +303,9 @@ export function getActiveUiStep(run: DeliveryRun): number {
     computed = 2;
   }
 
+  const capForPrCreation = (step: number) =>
+    prReviewReady || step <= 2 ? step : 2;
+
   if (run.ui_active_step && run.ui_active_step >= 1 && run.ui_active_step <= 4) {
     if (isMergeOrDeployRunning(run) || run.pending_deploy_retry) {
       return Math.min(run.ui_active_step, 3);
@@ -251,10 +317,10 @@ export function getActiveUiStep(run: DeliveryRun): number {
     ) {
       return Math.min(run.ui_active_step, 3);
     }
-    return Math.max(run.ui_active_step, computed);
+    return capForPrCreation(Math.max(run.ui_active_step, computed));
   }
 
-  return computed;
+  return capForPrCreation(computed);
 }
 
 export function getMaxNavigableStep(run: DeliveryRun): number {
