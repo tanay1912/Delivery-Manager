@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -83,7 +83,9 @@ class AppSettings(Base):
     jira_impact_analysis_field: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     jira_unit_testing_field: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     jira_admin_database_field: Mapped[str] = mapped_column(String(64), nullable=False, default="")
-    jira_fields_cache: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    jira_fields_cache: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
     jira_fields_cached_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -102,8 +104,12 @@ class DeliveryRun(Base):
     summary: Mapped[str] = mapped_column(String(512), nullable=False, default="")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     current_step: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    steps_log: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
-    context_data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    steps_log: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    context_data: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     estimation_hours: Mapped[float | None] = mapped_column(nullable=True)
     estimation_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     branch_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
