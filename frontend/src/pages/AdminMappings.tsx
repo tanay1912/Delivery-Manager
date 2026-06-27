@@ -252,6 +252,20 @@ export default function AdminMappings() {
     [mappings],
   );
 
+  const loadSavedPemKey = useCallback(
+    async (mappingId: string) => {
+      try {
+        const data = await api.revealMappingSshPrivateKey(mappingId);
+        if (data.ssh_private_key) {
+          setForm((current) => ({ ...current, ssh_private_key: data.ssh_private_key }));
+        }
+      } catch (err) {
+        handleAuthError(err);
+      }
+    },
+    [handleAuthError],
+  );
+
   const applyProjectSelection = useCallback(
     (projectKey: string) => {
       const key = normalizeProjectKey(projectKey);
@@ -264,6 +278,9 @@ export default function AdminMappings() {
         setForm(mappingToForm(existing));
         setSshPasswordConfigured(existing.ssh_password_configured);
         setSshPrivateKeyConfigured(existing.ssh_private_key_configured);
+        if (existing.ssh_auth_type === "pem" && existing.ssh_private_key_configured) {
+          void loadSavedPemKey(existing.id);
+        }
       } else {
         setEditingId(null);
         setForm({
@@ -276,7 +293,7 @@ export default function AdminMappings() {
       setActiveConfigTab("bitbucket");
       setError(null);
     },
-    [mappingByKey],
+    [mappingByKey, loadSavedPemKey],
   );
 
   useEffect(() => {
@@ -287,7 +304,10 @@ export default function AdminMappings() {
     setForm(mappingToForm(existing));
     setSshPasswordConfigured(existing.ssh_password_configured);
     setSshPrivateKeyConfigured(existing.ssh_private_key_configured);
-  }, [mappingByKey, selectedProjectKey, loading, editingId]);
+    if (existing.ssh_auth_type === "pem" && existing.ssh_private_key_configured) {
+      void loadSavedPemKey(existing.id);
+    }
+  }, [mappingByKey, selectedProjectKey, loading, editingId, loadSavedPemKey]);
 
   useEffect(() => {
     const projectKey = searchParams.get("project")?.trim().toUpperCase();
@@ -392,6 +412,9 @@ export default function AdminMappings() {
       setForm(mappingToForm(savedMapping));
       setSshPasswordConfigured(savedMapping.ssh_password_configured);
       setSshPrivateKeyConfigured(savedMapping.ssh_private_key_configured);
+      if (savedMapping.ssh_auth_type === "pem" && savedMapping.ssh_private_key_configured) {
+        void loadSavedPemKey(savedMapping.id);
+      }
       toast(wasEditing ? "Mapping updated." : "Mapping created.", "success");
     } catch (err) {
       handleAuthError(err);
@@ -1059,9 +1082,12 @@ export default function AdminMappings() {
                                     name="ssh_auth_type"
                                     value="pem"
                                     checked={form.ssh_auth_type === "pem"}
-                                    onChange={() =>
-                                      setForm({ ...form, ssh_auth_type: "pem", ssh_password: "" })
-                                    }
+                                    onChange={() => {
+                                      setForm({ ...form, ssh_auth_type: "pem", ssh_password: "" });
+                                      if (editingId && sshPrivateKeyConfigured) {
+                                        void loadSavedPemKey(editingId);
+                                      }
+                                    }}
                                     className="text-brand-600 focus:ring-brand-500"
                                   />
                                   PEM file
@@ -1095,6 +1121,9 @@ export default function AdminMappings() {
                                   onChange={handlePemFileChange}
                                   className="block w-full text-sm text-slate-600 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-brand-50 file:text-brand-700 hover:file:bg-brand-100"
                                 />
+                                {sshPrivateKeyConfigured && (
+                                  <span className="text-xs text-emerald-600">PEM key saved</span>
+                                )}
                                 <span className="text-xs text-slate-500">
                                   Select a `.pem` or `.key` file from your server provider.
                                 </span>
@@ -1104,35 +1133,14 @@ export default function AdminMappings() {
                                 <span className="label">Or paste PEM contents</span>
                                 <textarea
                                   rows={5}
-                                  placeholder={
-                                    sshPrivateKeyConfigured
-                                      ? "Leave blank to keep existing PEM key"
-                                      : "-----BEGIN RSA PRIVATE KEY-----\n..."
-                                  }
+                                  placeholder="-----BEGIN RSA PRIVATE KEY-----\n..."
                                   value={form.ssh_private_key}
                                   onChange={(e) => setForm({ ...form, ssh_private_key: e.target.value })}
                                   className="input font-mono text-sm resize-y min-h-[8rem]"
                                 />
-                                {sshPrivateKeyConfigured && !form.ssh_private_key && (
-                                  <span className="text-xs text-emerald-600">PEM key saved</span>
-                                )}
                               </label>
                             </div>
                           )}
-
-                          <label className="block space-y-1.5">
-                            <span className="label">Local project directory</span>
-                            <input
-                              type="text"
-                              placeholder="/var/www/html/myproject"
-                              value={form.local_project_directory}
-                              onChange={(e) => setForm({ ...form, local_project_directory: e.target.value })}
-                              className="input font-mono"
-                            />
-                            <span className="text-xs text-slate-500">
-                              Path to this repo on your development machine. Shown in delivery workflow git commands.
-                            </span>
-                          </label>
 
                           <label className="block space-y-1.5">
                             <span className="label">Project root directory</span>

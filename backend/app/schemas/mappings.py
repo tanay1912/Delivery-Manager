@@ -106,3 +106,7 @@ class MappingResponse(BaseModel):
 
 class MappingListResponse(BaseModel):
     mappings: list[MappingResponse]
+
+
+class MappingSshPrivateKeyResponse(BaseModel):
+    ssh_private_key: str

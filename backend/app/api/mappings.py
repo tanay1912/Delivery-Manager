@@ -6,11 +6,17 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.crypto import encrypt_token
+from app.auth.crypto import decrypt_token, encrypt_token
 from app.db.models import ProjectRepoMapping
 from app.db.session import get_db
 from app.middleware.auth_guard import require_auth
-from app.schemas.mappings import MappingCreate, MappingListResponse, MappingResponse, MappingUpdate
+from app.schemas.mappings import (
+    MappingCreate,
+    MappingListResponse,
+    MappingResponse,
+    MappingSshPrivateKeyResponse,
+    MappingUpdate,
+)
 from app.services.deploy_commands import build_post_merge_shell_script
 
 router = APIRouter(prefix="/api/mappings", tags=["mappings"])
@@ -146,6 +152,22 @@ async def update_mapping(
         raise HTTPException(status_code=409, detail="A mapping with that project key already exists")
     await db.refresh(mapping)
     return mapping_to_response(mapping)
+
+
+@router.get("/{mapping_id}/ssh-private-key", response_model=MappingSshPrivateKeyResponse)
+async def reveal_ssh_private_key(
+    mapping_id: uuid.UUID,
+    _: dict = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    mapping = await db.get(ProjectRepoMapping, mapping_id)
+    if not mapping:
+        raise HTTPException(status_code=404, detail="Mapping not found")
+    if not mapping.ssh_private_key_encrypted:
+        raise HTTPException(status_code=404, detail="SSH private key is not configured")
+    return MappingSshPrivateKeyResponse(
+        ssh_private_key=decrypt_token(mapping.ssh_private_key_encrypted),
+    )
 
 
 @router.delete("/{mapping_id}", status_code=204)

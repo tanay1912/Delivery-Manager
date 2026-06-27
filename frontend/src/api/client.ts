@@ -523,6 +523,8 @@ export const api = {
     request<Mapping>(`/api/mappings/${id}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteMapping: (id: string) =>
     request<void>(`/api/mappings/${id}`, { method: "DELETE" }),
+  revealMappingSshPrivateKey: (id: string) =>
+    request<{ ssh_private_key: string }>(`/api/mappings/${id}/ssh-private-key`),
   getAdminDatabaseSettings: () => request<AdminDatabaseSettings>("/api/admin/database"),
   updateAdminDatabaseSettings: (body: AdminDatabaseSettingsInput) =>
     request<AdminDatabaseSettings>("/api/admin/database", {
