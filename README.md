@@ -272,7 +272,7 @@ OAuth 3LO apps require a site admin to authorize the app on many company Jira si
 
 | Issue | Fix |
 |-------|-----|
-| `./restart.sh` fails after git pull | Ensure Docker is running and your user can run `docker` (or use `sudo ./restart.sh`). If `.env` was missing, `restart.sh` creates it from `.env.example` on first run |
+| `./restart.sh` fails after git pull | Ensure Docker is running. If you see `unknown shorthand flag: 'f' in -f`, install Compose: `sudo apt install docker-compose-plugin` (or `docker-compose`), then run `./restart.sh` — do not run `docker compose -f` manually unless the plugin is installed |
 | Invalid credentials on connect | Check site URL, email, and API token; token must belong to the same email |
 | Bitbucket 401 during delivery | Reconnect Bitbucket in Settings using your Atlassian email and a Bitbucket API token (app passwords no longer work for repository APIs) |
 | 401 on dashboard | Session expired — connect again |

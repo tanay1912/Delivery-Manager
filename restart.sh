@@ -61,19 +61,6 @@ ensure_mount_path() {
   fi
 }
 
-resolve_compose() {
-  if docker compose version >/dev/null 2>&1; then
-    COMPOSE=(docker compose -f "$COMPOSE_FILE")
-    return 0
-  fi
-  if command -v docker-compose >/dev/null 2>&1; then
-    COMPOSE=(docker-compose -f "$COMPOSE_FILE")
-    return 0
-  fi
-  echo "Error: docker compose is not available (need 'docker compose' or 'docker-compose')." >&2
-  exit 1
-}
-
 check_docker() {
   if ! command -v docker >/dev/null 2>&1; then
     echo "Error: docker is not installed or not on PATH." >&2
@@ -119,6 +106,8 @@ wait_for_url() {
 ensure_env_file
 ensure_mount_path
 check_docker
+# shellcheck source=scripts/compose.sh
+source "$ROOT/scripts/compose.sh"
 resolve_compose
 
 if ! command -v curl >/dev/null 2>&1; then

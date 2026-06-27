@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
+
+# shellcheck source=scripts/compose.sh
+source "$ROOT/scripts/compose.sh"
+resolve_compose
 
 echo "Rebuilding and restarting the dev backend (hot-reload, current API routes)..."
-docker compose -f docker-compose.dev.yml up --build -d backend
+"${COMPOSE[@]}" up --build -d backend
 echo ""
 echo "Waiting for backend health..."
 for _ in $(seq 1 30); do
@@ -17,5 +22,5 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 
-echo "Backend started but estimation API not detected yet. Check: docker compose -f docker-compose.dev.yml logs backend"
+echo "Backend started but estimation API not detected yet. Check: ${COMPOSE[*]} logs backend"
 exit 1

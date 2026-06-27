@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
 
 if [[ ! -f .env ]]; then
   if [[ -f .env.example ]]; then
@@ -13,8 +14,12 @@ if [[ ! -f .env ]]; then
   fi
 fi
 
+# shellcheck source=scripts/compose.sh
+source "$ROOT/scripts/compose.sh"
+resolve_compose
+
 echo "Starting dev stack (Postgres, Redis, backend --reload, Vite HMR)..."
 echo "Open http://localhost:5173 after services are ready."
 echo "Press Ctrl+C to stop."
 
-docker compose -f docker-compose.dev.yml up --build
+"${COMPOSE[@]}" up --build
